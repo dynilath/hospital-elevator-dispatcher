@@ -603,7 +603,7 @@ export class GameEngine {
   /**
    * 指令重排(「往里走走」/「靠右站站」):不一定对所有人都生效——
    * 多数乘客配合挪动,少数不听;病床/担架与阿巴阿巴患者永远原地不动。
-   * mode 'deep' 往深处走(腾出门口),'right' 尽量靠右站。
+   * mode 'deep' 往深处走(腾出门口),'right' 尽量靠右站(腾出左列给病床)。
    */
   private repackByCommand(mode: 'deep' | 'right') {
     const aboard = this.tasks
@@ -625,31 +625,17 @@ export class GameEngine {
       }
     }
     this.placements = next;
-    // 配合的乘客按指令挪动:深度优先;靠右模式列序从右到左
-    const cols = (right: boolean): number[] => (right ? [2, 1, 0] : [0, 1, 2]);
     // 2) 轮椅
     for (const t of aboard) {
       if (t.kind !== 'wheelchair' || next.has(t.id)) continue;
-      outer: for (let row = GRID_ROWS - 2; row >= 0; row--) {
-        for (const col of cols(mode === 'right')) {
-          if (this.cellsFree(col, row, 2, 2)) {
-            this.placements.set(t.id, { col, row, w: 2, h: 2 });
-            break outer;
-          }
-        }
-      }
+      const spot = this.repackSpot(mode, GRID_COLS - 2, GRID_ROWS - 2, 2, 2);
+      if (spot) this.placements.set(t.id, { col: spot.col, row: spot.row, w: 2, h: 2 });
     }
     // 3) 站立
     for (const t of aboard) {
       if (t.kind !== 'stand' || next.has(t.id)) continue;
-      outer: for (let row = GRID_ROWS - 1; row >= 0; row--) {
-        for (const col of cols(mode === 'right')) {
-          if (this.cellsFree(col, row, 1, 1)) {
-            this.placements.set(t.id, { col, row, w: 1, h: 1 });
-            break outer;
-          }
-        }
-      }
+      const spot = this.repackSpot(mode, GRID_COLS - 1, GRID_ROWS - 1, 1, 1);
+      if (spot) this.placements.set(t.id, { col: spot.col, row: spot.row, w: 1, h: 1 });
     }
     // 4) 家属陪护(同样配合概率;不配合的留在原位)
     const compNext = new Map<number, { col: number; row: number }>();
@@ -660,14 +646,8 @@ export class GameEngine {
         if (old) compNext.set(t.id, old);
         continue;
       }
-      outer: for (let row = GRID_ROWS - 1; row >= 0; row--) {
-        for (const col of cols(mode === 'right')) {
-          if (this.cellsFree(col, row, 1, 1)) {
-            compNext.set(t.id, { col, row });
-            break outer;
-          }
-        }
-      }
+      const spot = this.repackSpot(mode, GRID_COLS - 1, GRID_ROWS - 1, 1, 1);
+      if (spot) compNext.set(t.id, spot);
     }
     this.companions = compNext;
     // 3) 反馈:指令完全没效果时解释原因(病床/担架不动是常态,不提示;阿巴阿巴与拒不听令才提示)
@@ -678,6 +658,30 @@ export class GameEngine {
         this.pushEvent('😤 乘客都不肯听你的指挥');
       }
     }
+  }
+
+  /** 指令重排的候选格顺序:deep 行主序(先深后浅);right 列主序(先右后左,列内先深后浅) */
+  private repackSpot(
+    mode: 'deep' | 'right',
+    maxCol: number,
+    maxRow: number,
+    w: number,
+    h: number,
+  ): { col: number; row: number } | null {
+    if (mode === 'right') {
+      for (let col = maxCol; col >= 0; col--) {
+        for (let row = maxRow; row >= 0; row--) {
+          if (this.cellsFree(col, row, w, h)) return { col, row };
+        }
+      }
+      return null;
+    }
+    for (let row = maxRow; row >= 0; row--) {
+      for (let col = 0; col <= maxCol; col++) {
+        if (this.cellsFree(col, row, w, h)) return { col, row };
+      }
+    }
+    return null;
   }
 
   /** 供 3D 场景读取的网格占位 */

@@ -449,7 +449,7 @@ function check(name: string, cond: boolean, extra = '') {
   Math.random = () => 0; // 配合
   e.repackByCommand('right');
   const p = e.placements.get(10);
-  check('靠右站站:尽量靠右(右列被调度员占则次右)', p?.col === 1 && p?.row === 3, `pos=${p?.col},${p?.row}`);
+  check('靠右站站:优先右列(右列最深处被调度员占则右列顺移)', p?.col === 2 && p?.row === 2, `pos=${p?.col},${p?.row}`);
   // 冷却共用:按完「往里走走」后立刻按「靠右站站」不应再重排
   eng.pressRemind();
   const beforeRow = e.placements.get(10)!.row;
