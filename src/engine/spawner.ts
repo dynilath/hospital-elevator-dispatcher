@@ -1,5 +1,6 @@
 import {
   CT_FLOOR,
+  RAD_FLOOR,
   OR_FLOOR,
   ICU_FLOOR,
   WARD_FLOOR,
@@ -128,7 +129,8 @@ export class Spawner {
 
     // 剧情电话:领导急召
     if (roll < 0.42) {
-      const tgt = ward ?? OR_FLOOR;
+      // 目标钳制:简单难度(4 层)无手术室,送往最高层抢救区
+      const tgt = ward ?? Math.min(OR_FLOOR, floors);
       return {
         type: 'normal',
         title: pick(['院办', '医务科', '护理部']),
@@ -161,7 +163,7 @@ export class Spawner {
         title: '急诊大厅',
         text: `${name} 需拍 X 光片,请送至放射科`,
         fromFloor: 1,
-        targetFloor: 4,
+        targetFloor: RAD_FLOOR,
         kind: pickKind([['wheelchair', 4], ['stand', 4], ['bed', 2]]),
         deadline: 0,
         callDelay: 0,
@@ -204,7 +206,7 @@ export class Spawner {
         type: 'normal',
         title: '放射科',
         text: `${name} 拍片完毕,请接回急诊大厅`,
-        fromFloor: 4,
+        fromFloor: RAD_FLOOR,
         targetFloor: 1,
         kind: pickKind([['wheelchair', 5], ['stand', 3], ['bed', 2]]),
         deadline: 0,
@@ -254,7 +256,7 @@ export class Spawner {
           title: deptOf(ward),
           text: `${name} 需拍片检查,请到 ${deptOf(ward)} 接人送至放射科`,
           fromFloor: ward,
-          targetFloor: 4,
+          targetFloor: RAD_FLOOR,
           kind: pickKind([['wheelchair', 5], ['stand', 4], ['bed', 1]]),
           deadline: 0,
           callDelay: 0,
@@ -275,7 +277,7 @@ export class Spawner {
           type: 'normal',
           title: '放射科',
           text: `${name} 检查完毕,请送回 ${deptOf(ward)}`,
-          fromFloor: 4,
+          fromFloor: RAD_FLOOR,
           targetFloor: ward,
           kind: pickKind([['wheelchair', 5], ['stand', 4], ['bed', 1]]),
           deadline: 0,

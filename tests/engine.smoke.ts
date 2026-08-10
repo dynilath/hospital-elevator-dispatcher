@@ -1,5 +1,6 @@
 // ─── 引擎逻辑无头验证(tsx 运行) ─────────────────────────────────
 import { GameEngine } from '../src/engine/Engine';
+import { Spawner } from '../src/engine/spawner';
 
 let failed = 0;
 function check(name: string, cond: boolean, extra = '') {
@@ -551,6 +552,72 @@ function check(name: string, cond: boolean, extra = '') {
   eng.pressRemind();
   check('只有病床时按指令无提示', eng.getSnapshot().eventMsg === null);
   check('病床保持原位', e.placements.get(50)!.row === 0 && e.placements.get(50)!.col === 0);
+}
+
+// ── 23. 放射科任务楼层与地图一致(3F,而非 CT 层 4F) ──────────────
+{
+  const spawner = new Spawner();
+  // 用固定随机序列驱动 makeCall 命中指定模板:
+  // [maskedName×3, roll≥0.42(跳过剧情电话), pick(templates), pickKind]
+  const run = (seq: number[]) => {
+    const orig = Math.random;
+    let i = 0;
+    Math.random = () => seq[i++ % seq.length];
+    try {
+      return spawner.makeCall(6);
+    } finally {
+      Math.random = orig;
+    }
+  };
+  // 模板 1:急诊 → 放射科(pick 值 0.2 → 0.2*7=1)
+  const toRad = run([0.5, 0.5, 0.5, 0.5, 0.2, 0.5]);
+  check('急诊→放射科:目标楼层 3F(与地图一致)', toRad.targetFloor === 3, `t=${toRad.targetFloor}`);
+  check('急诊→放射科:出发 1F', toRad.fromFloor === 1, `f=${toRad.fromFloor}`);
+  check('急诊→放射科:命中放射科模板', toRad.text.includes('放射科'), toRad.text);
+  // 模板 5:放射科 → 急诊(pick 值 0.75 → 0.75*7=5)
+  const fromRad = run([0.5, 0.5, 0.5, 0.5, 0.75, 0.5]);
+  check('放射科→急诊:出发楼层 3F(与地图一致)', fromRad.fromFloor === 3, `f=${fromRad.fromFloor}`);
+  check('放射科→急诊:目标 1F', fromRad.targetFloor === 1, `t=${fromRad.targetFloor}`);
+  check('放射科→急诊:命中放射科模板', fromRad.text.includes('拍片完毕'), fromRad.text);
+}
+
+// ── 24. 用户场景复现:3F 开门时只有 target=3 的乘客送达 ───────────
+{
+  const eng = new GameEngine({ floors: 6, emergencyGap: 78, dayMinutes: 5, simulate: false });
+  const e = eng as unknown as { tasks: unknown[]; processDoors(): void };
+  const now = Date.now() / 1000;
+  const mk = (id: number, targetFloor: number) => ({
+    id, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor, kind: 'stand',
+    status: 'aboard', createdAt: now, deadline: 0, wait: 0, callDelay: 0, callSent: true, callSentAt: now,
+  });
+  e.tasks.push(mk(61, 3), mk(62, 4), mk(63, 5)); // 放射科 3F / CT 4F / 手术室 5F
+  eng.elevator.floor = 3;
+  eng.elevator.posY = 3;
+  eng.elevator.doorState = 'open';
+  eng.elevator.doorTimer = 5;
+  eng.elevator.moving = false;
+  e.processDoors();
+  const st = (id: number) => (e.tasks.find((x) => (x as { id: number }).id === id) as { status: string }).status;
+  check('3F 开门:去 3F 的乘客送达', st(61) === 'delivered', st(61));
+  check('3F 开门:去 4F(CT)的乘客不下', st(62) === 'aboard', st(62));
+  check('3F 开门:去 5F(手术室)的乘客不下', st(63) === 'aboard', st(63));
+}
+
+// ── 25. 领导急召目标钳制:简单难度(4 层)不超出楼层上限 ───────────
+{
+  const spawner = new Spawner();
+  const orig = Math.random;
+  let i = 0;
+  // [maskedName×3, roll=0.35(命中 VIP 分支), pick(姓), pick(头衔), pickKind]
+  const seq = [0.5, 0.5, 0.5, 0.35, 0.5, 0.5, 0.5];
+  Math.random = () => seq[i++ % seq.length];
+  try {
+    const spec = spawner.makeCall(4);
+    check('VIP 任务目标不超过楼层数', spec.targetFloor === 4 && spec.targetFloor <= 4, `t=${spec.targetFloor}`);
+    check('VIP 任务出发 1F 且带 vip 标记', spec.fromFloor === 1 && spec.flavor === 'vip', `${spec.fromFloor} ${spec.flavor}`);
+  } finally {
+    Math.random = orig;
+  }
 }
 
 console.log(failed === 0 ? '\n== ALL PASS ==' : `\n== ${failed} FAILED ==`);

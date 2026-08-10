@@ -24,6 +24,7 @@ export const FLOOR_NAME = (floor: number): string => FLOOR_DEPTS[floor - 1]?.[0]
 export const FLOOR_DEPTS_OF = (floor: number): string[] => FLOOR_DEPTS[floor - 1] ?? [`${floor}F`];
 
 // ─── 关键楼层 ──────────────────────────────────────────────────
+export const RAD_FLOOR = 3;
 export const CT_FLOOR = 4;
 export const OR_FLOOR = 5;
 export const ICU_FLOOR = 6;

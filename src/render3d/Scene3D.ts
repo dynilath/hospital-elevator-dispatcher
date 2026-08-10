@@ -112,8 +112,8 @@ export class Scene3D {
   private walkBubbleTex!: THREE.CanvasTexture;
   /** 问乘客楼层后的回复气泡到期时间 */
   private askBubbleUntil = 0;
-  /** 新上梯站立角色"先去按按钮再找位置"动画 */
-  private pressFirstAnim: { taskId: number; target: number; phase: 'toPanel' | 'press' | 'toSpot'; t: number } | null = null;
+  /** 新上梯站立角色"先去按按钮再找位置"动画(按任务 id 独立推进,互不阻塞) */
+  private pressFirstAnims = new Map<number, { target: number; phase: 'toPanel' | 'press' | 'toSpot'; t: number }>();
   private seenAboard = new Set<number>();
   /** 离梯动画:病人先位移到电梯外再移除 */
   private exiting = new Map<number, { start: number; fromMain: THREE.Vector3; fromComp: THREE.Vector3 | null }>();
@@ -1315,16 +1315,11 @@ export class Scene3D {
     // 新上梯站立角色(家属):多数先去按电梯按钮,再回自己位置;少数忘记直接站
     // (角色固有性格由引擎在上车时确定,问话回复见 askPassenger)
     for (const t of aboard) {
-      if (!this.seenAboard.has(t.id) && t.kind === 'stand' && !this.pressFirstAnim) {
-        if (Math.random() < 0.65) {
-          let target = t.targetFloor;
-          if (target === floor || ev.lights.has(target)) {
-            const candidates = Array.from({ length: ev.floors }, (_, i) => i + 1).filter(
-              (f) => f !== floor && !ev.lights.has(f),
-            );
-            target = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : t.targetFloor;
-          }
-          this.pressFirstAnim = { taskId: t.id, target, phase: 'toPanel', t: 0 };
+      if (!this.seenAboard.has(t.id) && t.kind === 'stand' && !this.pressFirstAnims.has(t.id)) {
+        // 只按自己的目标楼层;已亮或已在目标层则无需按
+        // (随机按其他楼层会让电梯停在没人要去的楼层)
+        if (Math.random() < 0.65 && t.targetFloor !== floor && !ev.lights.has(t.targetFloor)) {
+          this.pressFirstAnims.set(t.id, { target: t.targetFloor, phase: 'toPanel', t: 0 });
         }
       }
     }
@@ -1344,7 +1339,8 @@ export class Scene3D {
       }
       m.rotation.y = rotY;
       // 先按按钮再找位置:途中目标为面板
-      if (this.pressFirstAnim && this.pressFirstAnim.taskId === t.id && this.pressFirstAnim.phase !== 'toSpot') {
+      const pf = this.pressFirstAnims.get(t.id);
+      if (pf && pf.phase !== 'toSpot') {
         tx = PANEL_STAND.x;
         tz = PANEL_STAND.z;
       }
@@ -1358,11 +1354,10 @@ export class Scene3D {
       }
     }
     this.seenAboard = new Set(aboard.map((t) => t.id));
-    // 推进"先按按钮"动画
-    if (this.pressFirstAnim) {
-      const a = this.pressFirstAnim;
+    // 推进"先按按钮"动画(多个角色可同时进行)
+    const dur = { toPanel: 0.9, press: 0.4, toSpot: 0.9 };
+    for (const [tid, a] of this.pressFirstAnims) {
       a.t += frameDt;
-      const dur = { toPanel: 0.9, press: 0.4, toSpot: 0.9 };
       if (a.t >= dur[a.phase]) {
         if (a.phase === 'toPanel') {
           this.engine.familyPressButton(a.target); // 走到面板:按下
@@ -1372,14 +1367,14 @@ export class Scene3D {
           a.phase = 'toSpot';
           a.t = 0;
         } else {
-          this.pressFirstAnim = null;
+          this.pressFirstAnims.delete(tid);
         }
       }
     }
 
-    // 病人离开:先位移到电梯外,再移除模型
+    // 病人离开:先位移到电梯外,再移除模型(门基本开齐后才启动,避免"穿门"错觉)
     for (const t of tasks) {
-      if (t.status === 'delivered' && this.models.has(t.id) && !this.exiting.has(t.id)) {
+      if (ev.doorOpen > 0.5 && t.status === 'delivered' && this.models.has(t.id) && !this.exiting.has(t.id)) {
         const m = this.models.get(t.id)!;
         const cm = this.companionModels.get(t.id) ?? null;
         this.exiting.set(t.id, {
@@ -1397,7 +1392,7 @@ export class Scene3D {
       }
       const p = Math.min(1, (now - ex.start) / 1.1);
       const ease = p * p * (3 - 2 * p);
-      const out = new THREE.Vector3(0, 0, -0.8); // 门外
+      const out = new THREE.Vector3(0, 0, -1.7); // 走廊深处(与候梯站位 -0.55 明显分离)
       m.position.lerpVectors(ex.fromMain, out, ease);
       const cm = this.companionModels.get(id);
       if (cm && ex.fromComp) {
@@ -1431,17 +1426,11 @@ export class Scene3D {
       if (this.familyWalkTimer <= 0) {
         this.familyWalkTimer = 6 + Math.random() * 6;
         const compTasks = tasks.filter((t) => t.status === 'aboard' && t.companion);
-        if (compTasks.length > 0) {
-          const t = compTasks[Math.floor(Math.random() * compTasks.length)];
-          // 先按自己要去的目的楼层;已登记则随机挑一层
-          let target = t.targetFloor;
-          if (target === floor || ev.lights.has(target)) {
-            const candidates = Array.from({ length: ev.floors }, (_, i) => i + 1).filter(
-              (f) => f !== floor && !ev.lights.has(f),
-            );
-            target = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : t.targetFloor;
-          }
-          this.familyAnim = { taskId: t.id, floor: target, phase: 'toPanel', t: 0 };
+        const t = compTasks[Math.floor(Math.random() * compTasks.length)];
+        // 只按患者要去的目的楼层;已亮或已在目标层则无需按
+        // (随机按其他楼层会让电梯停在没人要去的楼层)
+        if (t && t.targetFloor !== floor && !ev.lights.has(t.targetFloor)) {
+          this.familyAnim = { taskId: t.id, floor: t.targetFloor, phase: 'toPanel', t: 0 };
         }
       }
     } else {
@@ -1575,7 +1564,7 @@ export class Scene3D {
     // 问话气泡到期隐藏(且没有其他动画占用)
     if (this.askBubbleUntil > 0 && performance.now() > this.askBubbleUntil) {
       this.askBubbleUntil = 0;
-      if (!this.familyAnim && !this.hallAnim && !this.pressFirstAnim) {
+      if (!this.familyAnim && !this.hallAnim && this.pressFirstAnims.size === 0) {
         this.walkBubble.visible = false;
       }
     }
