@@ -46,10 +46,10 @@ function statusText(t: TaskView): string {
   }
 }
 
-/** 笔记本中的需求记录(仅已接听并看完完整内容的来电) */
+/** 笔记本中的需求记录(仅已接听并看完完整内容的来电;骚扰电话是恶作剧,不记录) */
 export default function Messages({ snap }: { snap: Snapshot }) {
-  const tasks = snap.tasks.filter((t) => t.callSent && t.recorded);
-  const unrecorded = snap.tasks.filter((t) => t.callSent && !t.recorded).length;
+  const tasks = snap.tasks.filter((t) => t.callSent && t.recorded && t.flavor !== 'prank');
+  const unrecorded = snap.tasks.filter((t) => t.callSent && !t.recorded && t.flavor !== 'prank').length;
 
   if (tasks.length === 0) {
     return (

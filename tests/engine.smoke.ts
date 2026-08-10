@@ -135,6 +135,40 @@ function check(name: string, cond: boolean, extra = '') {
   check('恶作剧不扣满意度', eng.getSnapshot().satisfaction === 100, `sat=${eng.getSnapshot().satisfaction}`);
 }
 
+// ── 6.6 骚扰电话:不计任务总数、不记完成数、超时不掉满意度 ────────
+{
+  const eng = new GameEngine({ floors: 10, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as {
+    tasks: unknown[];
+    overtime: boolean;
+    update(dt: number): void;
+    addTask(spec: unknown): void;
+    processDoors(): void;
+  };
+  e.overtime = true; // 停掉任务生成,保证统计确定性
+  const t0 = eng.getSnapshot();
+  e.addTask({
+    type: 'normal', title: '匿名来电', text: '8F 有人要下楼', fromFloor: 8, targetFloor: 8,
+    kind: 'stand', deadline: 0, callDelay: 0, flavor: 'prank',
+  });
+  const afterAdd = eng.getSnapshot();
+  check('骚扰电话不计入任务总数', afterAdd.total === t0.total, `total=${afterAdd.total}`);
+  // 超过 20s 宽限期也不掉满意度(没有真乘客在等)
+  const prank = e.tasks[e.tasks.length - 1] as { status: string; wait: number };
+  prank.wait = 30;
+  e.update(5);
+  check('骚扰电话超时不掉满意度', eng.getSnapshot().satisfaction === 100, `sat=${eng.getSnapshot().satisfaction}`);
+  // 到层识破后不计入完成数
+  eng.elevator.floor = 8;
+  eng.elevator.doorState = 'open';
+  eng.elevator.doorTimer = 5;
+  eng.elevator.moving = false;
+  e.processDoors();
+  const snap = eng.getSnapshot();
+  check('骚扰电话不记入完成数', snap.done === t0.done, `done=${snap.done}`);
+  check('骚扰电话识破后任务结束', prank.status === 'delivered', prank.status);
+}
+
 // ── 6.5 领导急召:上梯前每秒 −1 满意度;上梯后不再衰减 ────────────
 {
   const eng = new GameEngine({ floors: 10, emergencyGap: 55, dayMinutes: 5, simulate: false });

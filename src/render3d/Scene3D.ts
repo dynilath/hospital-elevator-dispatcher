@@ -54,6 +54,8 @@ interface RoleBubble {
   until: number;
   /** 气泡相对角色头部的高度(按角色类型固定) */
   headY: number;
+  /** 气泡跟随的模型来源(true=陪护,false=乘客) */
+  companion: boolean;
 }
 
 const R = 960 / 720; // 画布内部分辨率比(保持宽画布,轿厢本身收窄)
@@ -734,19 +736,29 @@ export class Scene3D {
     return this.bubbleAt(taskId, text, durationMs);
   }
 
-  /** 显示/刷新指定角色的头顶气泡(定位到角色当前位置);voice=true 时播放模拟人声 */
-  private bubbleAt(taskId: number, text: string, durationMs: number, voice = true): boolean {
-    const m = this.models.get(taskId) ?? this.companionModels.get(taskId);
+  /** 显示/刷新指定角色的头顶气泡(定位到角色当前位置);voice=true 播放人声;atCompanion=true 定位到陪护头顶;voicePersonality 指定人声风格(默认取任务性格) */
+  private bubbleAt(
+    taskId: number,
+    text: string,
+    durationMs: number,
+    voice = true,
+    atCompanion = false,
+    voicePersonality?: string,
+  ): boolean {
+    const m = atCompanion
+      ? (this.companionModels.get(taskId) ?? this.models.get(taskId))
+      : (this.models.get(taskId) ?? this.companionModels.get(taskId));
     if (!m) return false;
     let b = this.bubbles.get(taskId);
     if (!b) {
       const made = this.createBubbleSprite();
-      b = { sprite: made.sprite, tex: made.tex, until: 0, headY: 1.95 };
+      b = { sprite: made.sprite, tex: made.tex, until: 0, headY: 1.95, companion: atCompanion };
       this.bubbles.set(taskId, b);
     }
+    b.companion = atCompanion; // 刷新时同步模型来源(同一任务两种来源切换的极端情况)
     const t = this.engine.getTasks().find((x) => x.id === taskId);
-    // 气泡位于角色头部上方(轮椅/床有明显偏移)
-    b.headY = t ? (t.kind === 'wheelchair' ? 1.5 : t.kind === 'bed' || t.kind === 'stretcher' ? 1.1 : 1.95) : 1.95;
+    // 气泡位于角色头部上方(陪护站立固定 1.95;轮椅/床患者有明显偏移)
+    b.headY = atCompanion ? 1.95 : t ? (t.kind === 'wheelchair' ? 1.5 : t.kind === 'bed' || t.kind === 'stretcher' ? 1.1 : 1.95) : 1.95;
     this.drawBubble(b, text);
     b.until = performance.now() + durationMs;
     b.sprite.visible = true;
@@ -756,7 +768,7 @@ export class Scene3D {
       const chars = text.replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, '').length;
       const voiceMs = Math.min(durationMs, Math.max(450, chars * 190 + 250));
       // 阿巴阿巴角色(老年痴呆)用专属含糊人声
-      if (t?.personality === 'babbling') sfx.vocalizeBabble(voiceMs);
+      if ((voicePersonality ?? t?.personality) === 'babbling') sfx.vocalizeBabble(voiceMs);
       else sfx.vocalize(voiceMs);
     }
     return true;
@@ -794,7 +806,9 @@ export class Scene3D {
   private updateBubbles() {
     const now = performance.now();
     for (const [taskId, b] of this.bubbles) {
-      const m = this.models.get(taskId) ?? this.companionModels.get(taskId);
+      const m = b.companion
+        ? (this.companionModels.get(taskId) ?? this.models.get(taskId))
+        : (this.models.get(taskId) ?? this.companionModels.get(taskId));
       if (!m || now > b.until) {
         b.sprite.visible = false;
         this.scene.remove(b.sprite);
@@ -1055,9 +1069,9 @@ export class Scene3D {
     for (const h of hits) {
       // 交互标记可能在父级 Group 上(如笔记本)
       let obj: THREE.Object3D | null = h.object;
-      let ud: { type?: HitType; floor?: number; taskId?: number } | null = null;
+      let ud: { type?: HitType; floor?: number; taskId?: number; companion?: boolean } | null = null;
       while (obj && !ud?.type) {
-        ud = obj.userData as { type?: HitType; floor?: number; taskId?: number };
+        ud = obj.userData as { type?: HitType; floor?: number; taskId?: number; companion?: boolean };
         obj = obj.parent;
       }
       if (!ud?.type) continue;
@@ -1089,9 +1103,16 @@ export class Scene3D {
         case 'smile':
           this.cbs.onPressSmile(); // 「😊 微笑服务」:挑剔家属点头微笑
           return;
-        case 'ask':
-          this.askPassenger(ud.taskId!);
+        case 'ask': {
+          const t = this.engine.getTasks().find((x) => x.id === ud.taskId);
+          // 挑剔家属在场时,点击其本体优先触发微笑服务(而非询问楼层)
+          if (t?.flavor === 'critic' && t.status === 'aboard' && this.engine.criticActive) {
+            this.cbs.onPressSmile();
+          } else {
+            this.askPassenger(ud.taskId!, ud.companion === true);
+          }
           return;
+        }
       }
     }
   }
@@ -1105,8 +1126,13 @@ export class Scene3D {
     }
     this.hovered = obj;
     if (obj) {
-      // 贴画不放大(只显示描边);夹板放大整个组;其余交互对象放大本体
-      if (obj.userData.type !== 'map') {
+      // 贴画不放大(只显示描边);角色模型不放大(点击交互即可);夹板放大整个组;其余交互对象放大本体
+      // userData 标记可能在父级 Group 上(角色/夹板),需向上查找
+      let udType: string | undefined;
+      for (let o: THREE.Object3D | null = obj; o && !udType; o = o.parent) {
+        udType = (o.userData as { type?: string }).type;
+      }
+      if (udType !== 'map' && udType !== 'ask') {
         let target: THREE.Object3D = obj;
         for (let o: THREE.Object3D | null = obj; o; o = o.parent) {
           if (this.notebookGroup && o === this.notebookGroup) {
@@ -1550,10 +1576,10 @@ export class Scene3D {
       const a = this.familyAnim;
       a.t += frameDt;
       const dur = { toPanel: 1.1, press: 0.45, back: 1.1 };
-      // 头顶气泡:走到面板与按下阶段显示
+      // 头顶气泡:走到面板与按下阶段显示(定位在陪护角色头顶)
       const cm = this.companionModels.get(a.taskId);
       if (cm && a.phase !== 'back') {
-        this.bubbleAt(a.taskId, '按楼层按钮…', 2500, false);
+        this.bubbleAt(a.taskId, '按楼层按钮…', 2500, false, true);
       } else {
         this.removeBubble(a.taskId);
       }
@@ -1703,13 +1729,26 @@ export class Scene3D {
   }
 
   /** 玩家点击乘客询问"你要去哪层" */
-  private askPassenger(taskId: number) {
+  /** 点击角色询问目标楼层;fromCompanion=true 时陪护代替患者回应(气泡在陪护头顶) */
+  private askPassenger(taskId: number, fromCompanion = false) {
     const t = this.engine.getTasks().find((x) => x.id === taskId);
     if (!t || t.status !== 'aboard') return;
-    const m = this.models.get(taskId);
+    const m = fromCompanion
+      ? (this.companionModels.get(taskId) ?? this.models.get(taskId))
+      : (this.models.get(taskId) ?? this.companionModels.get(taskId));
     if (!m) return;
-    // 按角色固有性格回复(上车时确定,再怎么点都一样)
-    const type = t.personality ?? 'teller';
+    // 回复性格:患者本人按固有性格;陪护代替回应——护士必定正经告知楼层,家属如普通站立乘客随机
+    let type: NonNullable<Task['personality']>;
+    if (fromCompanion) {
+      if (t.companionKind === 'nurse') {
+        type = 'teller';
+      } else {
+        const r = Math.random();
+        type = r < 0.7 ? 'teller' : r < 0.85 ? 'grumpy' : 'mute';
+      }
+    } else {
+      type = t.personality ?? 'teller';
+    }
     let text: string;
     switch (type) {
       case 'babbling':
@@ -1731,8 +1770,8 @@ export class Scene3D {
         text = `我要去 ${t.targetFloor} 楼!`;
         sfx.message();
     }
-    // 卧床沉默「…」不算说话,不播人声
-    this.bubbleAt(taskId, text, 2400, text !== '…');
+    // 卧床沉默「…」不算说话,不播人声;人声风格随本次回复性格(阿巴阿巴用专属人声)
+    this.bubbleAt(taskId, text, 2400, text !== '…', fromCompanion, type);
   }
 
   private modelFor(t: Task): THREE.Group {
@@ -1760,12 +1799,14 @@ export class Scene3D {
     return buildPerson(PERSON_STYLES[t.id % PERSON_STYLES.length]);
   }
 
-  /** 取陪护模型(不存在则创建) */
+  /** 取陪护模型(不存在则创建);陪护可点击询问患者目标楼层 */
   private companionModelFor(t: Task): THREE.Group {
     let cm = this.companionModels.get(t.id);
     if (!cm) {
       cm = this.buildCompanionModel(t);
+      cm.userData = { type: 'ask' as HitType, taskId: t.id, companion: true };
       this.companionModels.set(t.id, cm);
+      this.interactives.push(cm);
       this.scene.add(cm);
     }
     return cm;

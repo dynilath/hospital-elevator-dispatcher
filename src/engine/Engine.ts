@@ -383,9 +383,11 @@ export class GameEngine {
     }
 
     // 满意度衰减:领导急召上梯前每秒 −1;普通任务超宽限期后按固定速率
+    // (骚扰电话是恶作剧,没有真乘客在等,不产生等待压力)
     let decay = 0;
     for (const t of this.tasks) {
       if (t.status !== 'pending') continue;
+      if (t.flavor === 'prank') continue;
       if (t.flavor === 'vip') decay += SAT_DECAY_VIP * dt;
       else if (t.wait > WAIT_GRACE) decay += SAT_DECAY_NORMAL * dt;
     }
@@ -503,12 +505,12 @@ export class GameEngine {
     }
 
     // 恶作剧识破:到层后发现没有真乘客(或恰好有人上了,算你走运)
+    // 骚扰电话不计入完成任务数(与总数一致,不影响完成率)
     const pranks = this.tasks.filter(
       (t) => t.flavor === 'prank' && t.status === 'pending' && t.fromFloor === F,
     );
     for (const t of pranks) {
       t.status = 'delivered';
-      this.statDone++;
       if (!boardedAny) {
         t.text = `${t.text} —— 到层后空无一人,被耍了 😤`;
         sfx.fail();
@@ -778,7 +780,8 @@ export class GameEngine {
       noCall: spec.noCall,
     };
     this.tasks.push(task);
-    this.statTotal++;
+    // 骚扰电话(恶作剧)不记入任务总数:不影响完成率与任务统计
+    if (spec.flavor !== 'prank') this.statTotal++;
     if (spec.type === 'emergency') this.statEmgTotal++;
     // 卧床病人必定电话通知:即使生成器误设 noCall 也忽略,强制走来电流程
     const noCall = spec.noCall && spec.kind !== 'bed' && spec.kind !== 'stretcher';
