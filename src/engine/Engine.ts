@@ -732,11 +732,14 @@ export class GameEngine {
       answered: false,
       answeredAt: 0,
       companion: spec.companion,
+      companionKind: spec.companionKind,
     };
     this.tasks.push(task);
     this.statTotal++;
     if (spec.type === 'emergency') this.statEmgTotal++;
-    if (spec.noCall) {
+    // 卧床病人必定电话通知:即使生成器误设 noCall 也忽略,强制走来电流程
+    const noCall = spec.noCall && spec.kind !== 'bed' && spec.kind !== 'stretcher';
+    if (noCall) {
       // 站立患者/家属不会打电话:自己按电梯(自动登记厅外呼叫 ▲/▼)
       const dir = spec.targetFloor > spec.fromFloor ? 'up' : 'down';
       if (!this.elevator.lights.has(spec.fromFloor)) {
@@ -857,6 +860,7 @@ export class GameEngine {
         answered: t.answered,
         answeredAt: t.answeredAt,
         companion: t.companion,
+        companionKind: t.companionKind,
         recorded: this.isRecorded(t),
       }))
       .reverse()

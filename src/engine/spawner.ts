@@ -12,7 +12,7 @@ import {
   MAX_PENDING_NORMAL,
   NORMAL_INTERVAL,
 } from '../config';
-import type { PassengerKind, TaskFlavor, TaskType } from '../types';
+import type { CompanionKind, PassengerKind, TaskFlavor, TaskType } from '../types';
 
 /** 生成的任务规格(引擎据此创建 Task) */
 export interface TaskSpec {
@@ -25,8 +25,9 @@ export interface TaskSpec {
   deadline: number;
   flavor?: TaskFlavor;
   callDelay: number;
-  /** 家属陪护(随病人上梯,占 1 格) */
+  /** 陪护人(随病人上梯,占 1 格):病床=家属,急救床=护士 */
   companion?: boolean;
+  companionKind?: CompanionKind;
   /** 不打来电话(站立患者自己按电梯) */
   noCall?: boolean;
 }
@@ -42,6 +43,28 @@ const pickKind = (weights: [PassengerKind, number][]): PassengerKind => {
   }
   return weights[0][0];
 };
+
+/** 卧床病人(病床)上电梯必有家属陪同推床;轮椅多数有家属陪护 */
+function companionOf(spec: TaskSpec): TaskSpec {
+  if (spec.kind === 'bed') {
+    spec.companion = true;
+    spec.companionKind = 'family';
+    spec.text += ' (家属陪同)';
+  } else if (spec.kind === 'wheelchair' && Math.random() < 0.6) {
+    spec.companion = true;
+    spec.companionKind = 'family';
+    spec.text += ' (家属陪同)';
+  }
+  return spec;
+}
+
+/** 急救床(担架)必有护士陪同推床 */
+function nurseCompanion(spec: TaskSpec): TaskSpec {
+  spec.companion = true;
+  spec.companionKind = 'nurse';
+  spec.text += ' (护士陪同)';
+  return spec;
+}
 
 /** 挂号打码姓名:郑** / 刘*明 / 王* */
 export function maskedName(): string {
@@ -110,7 +133,7 @@ export class Spawner {
     // 剧情电话:工勤来电(电话来得晚,态度差)
     if (roll < 0.3) {
       const f = pick(Array.from({ length: floors }, (_, i) => i + 1).filter((x) => x > 1));
-      return {
+      return companionOf({
         type: 'normal',
         title: deptOf(f),
         text: pick([
@@ -124,7 +147,7 @@ export class Spawner {
         deadline: 0,
         flavor: 'bang',
         callDelay: rnd(14, 22),
-      };
+      });
     }
 
     // 剧情电话:领导急召
@@ -285,13 +308,8 @@ export class Spawner {
         }),
       );
     }
-    const spec = pick(templates)();
-    // 轮椅/病床病人多数有家属陪护(不发电话,跟随上梯,占 1 格)
-    if ((spec.kind === 'wheelchair' || spec.kind === 'bed') && Math.random() < 0.6) {
-      spec.companion = true;
-      spec.text += ' (家属陪同)';
-    }
-    // 能走路的患者/家属默认不打来电话:他们自己按电梯(厅外呼叫)
+    const spec = companionOf(pick(templates)());
+    // 能走路的患者/家属默认不打来电话:他们自己按电梯(厅外呼叫);卧床病人必定来电
     if (spec.kind === 'stand' && !spec.flavor) {
       spec.noCall = true;
     }
@@ -304,7 +322,7 @@ export class Spawner {
     const hasICU = floors >= ICU_FLOOR;
     if (!hasOR) {
       // 小楼(4 层):无手术室,顶层设为抢救区
-      return {
+      return nurseCompanion({
         type: 'emergency',
         title: '急诊大厅',
         text: `急诊!危重患者需立即抢救,速送 ${FLOOR_NAME(floors)}!`,
@@ -313,11 +331,11 @@ export class Spawner {
         kind: 'stretcher',
         deadline: 75,
         callDelay: 0,
-      };
+      });
     }
     const templates: (() => TaskSpec | null)[] = [
       // 急诊 → 手术室(最常见,无家属)
-      () => ({
+      () => nurseCompanion({
         type: 'emergency',
         title: '急诊大厅',
         text: `急诊!危重患者需立即手术,急救床已就位,速送手术室!`,
@@ -331,7 +349,7 @@ export class Spawner {
     if (hasICU) {
       templates.push(
         // ICU → 手术室
-        () => ({
+        () => nurseCompanion({
           type: 'emergency',
           title: 'ICU 重症室',
           text: `ICU 病人病情恶化!速到 ICU 接人送手术室抢救!`,
@@ -342,7 +360,7 @@ export class Spawner {
           callDelay: 0,
         }),
         // 手术室 → ICU(家属跟车堵门)
-        () => ({
+        () => nurseCompanion({
           type: 'emergency',
           title: '手术室',
           text: `手术完毕!患者需立即转 ICU 监护!家属非要跟车,帮劝一劝!`,
@@ -354,7 +372,7 @@ export class Spawner {
           callDelay: 0,
         }),
         // 急诊 → ICU(家属跟车堵门)
-        () => ({
+        () => nurseCompanion({
           type: 'emergency',
           title: '急诊大厅',
           text: `危重患者已上急救床!速送 ICU!家属死活要跟着,来了就知道!`,

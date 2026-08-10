@@ -620,5 +620,46 @@ function check(name: string, cond: boolean, extra = '') {
   }
 }
 
+// ── 26. 卧床病人必有陪同:病床=家属,急救床=护士 ──────────────────
+{
+  const spawner = new Spawner();
+  // 固定随机序列命中「CT → 急诊留观」模板(6 层无病房,不消耗 ward pick):
+  // [maskedName×3, roll=0.5(常规模板), pick(templates)=0.6→0.6*7=4, pickKind=0.2→bed(权重 5/10)]
+  const run = (seq: number[]) => {
+    const orig = Math.random;
+    let i = 0;
+    Math.random = () => seq[i++ % seq.length];
+    try {
+      return spawner.makeCall(6);
+    } finally {
+      Math.random = orig;
+    }
+  };
+  const bed = run([0.5, 0.5, 0.5, 0.5, 0.6, 0.2]);
+  check('命中病床模板', bed.kind === 'bed', `kind=${bed.kind}`);
+  check('病床必有家属陪同', bed.companion === true && bed.companionKind === 'family', `comp=${bed.companionKind}`);
+  check('病床文案追加家属陪同', bed.text.includes('(家属陪同)'), bed.text);
+  check('病床不设 noCall(必有电话通知)', bed.noCall !== true, `noCall=${bed.noCall}`);
+  // 急救床(担架):所有紧急模板都带护士陪同
+  const emg = spawner.makeEmergency(8);
+  check('急救床必有护士陪同', emg !== null && emg.kind === 'stretcher' && emg.companion === true && emg.companionKind === 'nurse', `kind=${emg?.kind} comp=${emg?.companionKind}`);
+  check('急救床文案追加护士陪同', emg?.text.includes('(护士陪同)') ?? false, emg?.text ?? '');
+  const emgSmall = spawner.makeEmergency(4);
+  check('小楼急救床同样护士陪同', emgSmall !== null && emgSmall.companion === true && emgSmall.companionKind === 'nurse', `comp=${emgSmall?.companionKind}`);
+}
+
+// ── 27. 卧床病人必来电:即使生成器误设 noCall 也强制电话流程 ──────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as { addTask(spec: unknown): void; tasks: unknown[] };
+  e.addTask({
+    type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 2, kind: 'bed',
+    deadline: 0, callDelay: 0, noCall: true, companion: true, companionKind: 'family',
+  });
+  const task = e.tasks[0] as { callSent: boolean; companion: boolean; companionKind: string };
+  check('卧床病人 noCall 被忽略(必有电话通知)', task.callSent === true, `callSent=${task.callSent}`);
+  check('companionKind 透传到任务', task.companion === true && task.companionKind === 'family', `${task.companionKind}`);
+}
+
 console.log(failed === 0 ? '\n== ALL PASS ==' : `\n== ${failed} FAILED ==`);
 process.exit(failed === 0 ? 0 : 1);

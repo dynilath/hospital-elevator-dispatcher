@@ -3,7 +3,7 @@ import type { GameEngine } from '../engine/Engine';
 import { FLOOR_DEPTS_OF, FLOOR_NAME } from '../config';
 import { sfx } from '../engine/audio';
 import { arrow, canvasTexture, draw7seg, FONT_CN, FONT_PX, makeCanvas } from './canvasUtils';
-import { buildModelForKind, buildPerson, disposeGroup, M, PERSON_STYLES } from './models';
+import { buildModelForKind, buildNurse, buildPerson, disposeGroup, M, PERSON_STYLES } from './models';
 import type { Task, TaskView } from '../types';
 
 export interface SceneCallbacks {
@@ -28,6 +28,16 @@ const cellCenter = (col: number, row: number, w: number, h: number): { x: number
 });
 /** 家属按面板按钮时的站位(面板前、更靠近电梯门,避免贴到镜头) */
 const PANEL_STAND = { x: 1.55, z: 1.75 };
+/** 推床位:病床局部坐标的床头端外侧(陪护站此推床,随病床绕 Y 旋转) */
+const PUSH_OFFSET = { x: -0.82, z: 0.55 };
+/** 推床位世界偏移(病床旋转后;flip 时镜像到床尾侧,用于第二张候梯病床避免贴墙) */
+const pushOffsetOf = (rotY: number, flip = false): { x: number; z: number } => {
+  const ox = flip ? -PUSH_OFFSET.x : PUSH_OFFSET.x;
+  return {
+    x: ox * Math.cos(rotY) + PUSH_OFFSET.z * Math.sin(rotY),
+    z: -ox * Math.sin(rotY) + PUSH_OFFSET.z * Math.cos(rotY),
+  };
+};
 
 const R = 960 / 720; // 画布内部分辨率比(保持宽画布,轿厢本身收窄)
 
@@ -1241,6 +1251,8 @@ export class Scene3D {
     const ev = this.engine.elevator;
     const tasks = this.engine.getTasks();
     const alive = new Set<number>();
+    /** 本帧存活(待渲染)的陪护任务 id(候梯卧床的陪护 + 轿厢内陪护) */
+    const compAlive = new Set<number>();
     const floor = ev.floor;
     const now = performance.now() / 1000;
     const lerpK = Math.min(1, frameDt * 4);
@@ -1265,6 +1277,15 @@ export class Scene3D {
       m.position.z += (tz - m.position.z) * lerpK;
       if (this.hallAnim && this.hallAnim.taskId === t.id && this.hallAnim.phase !== 'back') {
         this.showBubble(this.hallAnim.dir === 'up' ? '按上行 ▲' : '按下行 ▼', m.position.x, m.position.y + 1.85, m.position.z);
+      }
+      // 卧床病人候梯时,陪护已站在床头推床位(与病床一起进入轿厢,表现推床)
+      // 第二张病床(靠墙侧)的陪护镜像到床尾侧,避免站进走廊墙里
+      if (t.companion && (t.kind === 'bed' || t.kind === 'stretcher')) {
+        compAlive.add(t.id);
+        const cm = this.companionModelFor(t);
+        cm.visible = m.visible;
+        cm.rotation.y = m.rotation.y;
+        this.lerpToPushPos(cm, m, lerpK, i === 1);
       }
     });
 
@@ -1390,13 +1411,25 @@ export class Scene3D {
         this.exiting.delete(id);
         continue;
       }
+      // 陪护开始离梯:终止其走到面板按按钮的动画
+      if (this.familyAnim && this.familyAnim.taskId === id) {
+        this.familyAnim = null;
+        this.walkBubble.visible = false;
+      }
+      const t = tasks.find((x) => x.id === id);
       const p = Math.min(1, (now - ex.start) / 1.1);
       const ease = p * p * (3 - 2 * p);
       const out = new THREE.Vector3(0, 0, -1.7); // 走廊深处(与候梯站位 -0.55 明显分离)
       m.position.lerpVectors(ex.fromMain, out, ease);
       const cm = this.companionModels.get(id);
       if (cm && ex.fromComp) {
-        cm.position.lerpVectors(ex.fromComp, out, ease);
+        if (t && (t.kind === 'bed' || t.kind === 'stretcher')) {
+          // 卧床离梯:陪护守在床头推床位,随病床一起推出走廊(表现推床)
+          cm.rotation.y = m.rotation.y;
+          this.lerpToPushPos(cm, m, lerpK);
+        } else {
+          cm.position.lerpVectors(ex.fromComp, out, ease);
+        }
         if (p >= 1) {
           this.companionModels.delete(id);
           this.scene.remove(cm);
@@ -1459,35 +1492,50 @@ export class Scene3D {
       }
     }
 
-    // 家属陪护模型(占 1 格,平时守在病人旁)
+    // 家属/护士陪护模型(占 1 格,平时守在病人旁;卧床病人上下梯时守推床位)
     const comps = this.engine.getCompanionPlacements();
-    const compAlive = new Set<number>();
     for (const [tid, cell] of comps) {
       const t = tasks.find((x) => x.id === tid);
       if (!t || t.status !== 'aboard') continue;
       compAlive.add(tid);
-      let cm = this.companionModels.get(tid);
-      if (!cm) {
-        cm = buildPerson(PERSON_STYLES[tid % PERSON_STYLES.length]);
-        this.companionModels.set(tid, cm);
-        this.scene.add(cm);
-      }
+      const cm = this.companionModelFor(t);
       cm.visible = true;
       const c = cellCenter(cell.col, cell.row, 1, 1);
       let tx = c.x;
       let tz = c.z;
+      let rotY = 0;
+      // 卧床病人:上梯途中(病床未到位)守在床头推床位,停稳后走回自己的格子
+      if ((t.kind === 'bed' || t.kind === 'stretcher') && !(this.familyAnim && this.familyAnim.taskId === tid)) {
+        const bedM = this.models.get(tid);
+        if (bedM) {
+          const p = placements.get(tid);
+          const bc = p ? cellCenter(p.col, p.row, p.w, p.h) : null;
+          const bedMoving =
+            this.exiting.has(tid) ||
+            !bc ||
+            Math.abs(bedM.position.x - bc.x) > 0.25 ||
+            Math.abs(bedM.position.z - bc.z) > 0.25;
+          if (bedMoving) {
+            rotY = bedM.rotation.y;
+            const off = pushOffsetOf(rotY);
+            tx = bedM.position.x + off.x;
+            tz = bedM.position.z + off.z;
+          }
+        }
+      }
       // 按键动画:走到面板前,再回到原位
       if (this.familyAnim && this.familyAnim.taskId === tid && this.familyAnim.phase !== 'back') {
         tx = PANEL_STAND.x;
         tz = PANEL_STAND.z;
       }
-      cm.rotation.y = 0;
+      cm.rotation.y = rotY;
       cm.position.x += (tx - cm.position.x) * lerpK;
       cm.position.z += (tz - cm.position.z) * lerpK;
       cm.position.y = Math.sin(now * 2.4 + tid) * 0.015;
     }
+    // 清理:不存活且不在离梯动画中的陪护模型
     for (const [tid, cm] of this.companionModels) {
-      if (!compAlive.has(tid)) {
+      if (!compAlive.has(tid) && !this.exiting.has(tid)) {
         this.companionModels.delete(tid);
         this.scene.remove(cm);
         disposeGroup(cm);
@@ -1615,6 +1663,33 @@ export class Scene3D {
       this.scene.add(m);
     }
     return m;
+  }
+
+  /** 创建陪护模型:护士(急救床)/ 家属(病床、轮椅) */
+  private buildCompanionModel(t: Task): THREE.Group {
+    if (t.companionKind === 'nurse') {
+      return buildNurse(PERSON_STYLES[t.id % PERSON_STYLES.length].hair);
+    }
+    return buildPerson(PERSON_STYLES[t.id % PERSON_STYLES.length]);
+  }
+
+  /** 取陪护模型(不存在则创建) */
+  private companionModelFor(t: Task): THREE.Group {
+    let cm = this.companionModels.get(t.id);
+    if (!cm) {
+      cm = this.buildCompanionModel(t);
+      this.companionModels.set(t.id, cm);
+      this.scene.add(cm);
+    }
+    return cm;
+  }
+
+  /** 陪护移动到病床的推床位(床头外侧,随病床旋转;加速收敛避免追床滞后) */
+  private lerpToPushPos(cm: THREE.Group, bed: THREE.Group, lerpK: number, flip = false) {
+    const off = pushOffsetOf(bed.rotation.y, flip);
+    const k = Math.min(1, lerpK * 2.5);
+    cm.position.x += (bed.position.x + off.x - cm.position.x) * k;
+    cm.position.z += (bed.position.z + off.z - cm.position.z) * k;
   }
 
   // ─── 清理 ────────────────────────────────────────────────────

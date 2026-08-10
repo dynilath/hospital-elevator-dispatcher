@@ -77,6 +77,50 @@ export function buildPerson(s: PersonStyle): THREE.Group {
   return g;
 }
 
+/** 护士(白色护士服 + 护士帽红十字符,高约 1.73;急救床陪护) */
+export function buildNurse(hair: string): THREE.Group {
+  const g = new THREE.Group();
+  // 腿(白裤)
+  const legL = box(0.12, 0.85, 0.14, M.gray);
+  legL.position.set(-0.085, 0.425, 0);
+  const legR = legL.clone();
+  legR.position.x = 0.085;
+  g.add(legL, legR);
+  // 白色护士服
+  const torso = box(0.34, 0.5, 0.2, M.white);
+  torso.position.set(0, 1.1, 0);
+  g.add(torso);
+  // 手臂
+  const armL = box(0.09, 0.5, 0.13, M.white);
+  armL.position.set(-0.225, 1.08, 0);
+  const armR = armL.clone();
+  armR.position.x = 0.225;
+  g.add(armL, armR);
+  // 头
+  const head = box(0.24, 0.24, 0.24, M.skin);
+  head.position.set(0, 1.56, 0);
+  g.add(head);
+  // 发型(露在帽沿下)
+  const hairBox = box(0.26, 0.08, 0.26, hair);
+  hairBox.position.set(0, 1.64, 0);
+  g.add(hairBox);
+  // 护士帽(白色)
+  const cap = box(0.3, 0.1, 0.3, M.white);
+  cap.position.set(0, 1.71, 0);
+  g.add(cap);
+  // 帽上红十字(正面)
+  const crossV = box(0.05, 0.15, 0.03, M.red);
+  crossV.position.set(0, 1.72, -0.17);
+  const crossH = box(0.15, 0.05, 0.03, M.red);
+  crossH.position.set(0, 1.72, -0.17);
+  g.add(crossV, crossH);
+  // 鼻子(朝向 -Z)
+  const nose = box(0.05, 0.05, 0.05, M.skin);
+  nose.position.set(0, 1.55, -0.14);
+  g.add(nose);
+  return g;
+}
+
 /** 轮椅乘客(宽约 0.5) */
 export function buildWheelchair(s: PersonStyle): THREE.Group {
   const g = new THREE.Group();

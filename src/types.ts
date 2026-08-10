@@ -27,6 +27,9 @@ export interface Difficulty {
 /** 剧情电话类型 */
 export type TaskFlavor = 'vip' | 'prank' | 'bang' | 'family';
 
+/** 陪护人身份:家属(普通病床) / 护士(急救床) */
+export type CompanionKind = 'family' | 'nurse';
+
 /** 游戏内任务(呼叫) */
 export interface Task {
   id: number;
@@ -59,8 +62,10 @@ export interface Task {
   answered: boolean;
   /** 接听时刻(现实秒,打字机从此刻开始播放) */
   answeredAt: number;
-  /** 是否带家属陪护(家属站旁边,占用 1 格,会自己按电梯按钮) */
+  /** 是否带家属/护士陪护(陪护站旁边,占用 1 格,会自己按电梯按钮) */
   companion?: boolean;
+  /** 陪护人身份:家属 / 护士(决定模型与文案) */
+  companionKind?: CompanionKind;
   /** 家属堵门:送达前需先劝离家属 */
   familyBlocked?: boolean;
   /** 角色固有性格(上车时确定):teller 正常告知 / babbling 阿巴阿巴 / grumpy 不耐烦 / mute 沉默 / ignore 卧床无回应 */
@@ -92,8 +97,10 @@ export interface TaskView {
   answered: boolean;
   /** 接听时刻(现实秒) */
   answeredAt: number;
-  /** 家属陪护(随病人上梯,占 1 格) */
+  /** 家属/护士陪护(随病人上梯,占 1 格) */
   companion?: boolean;
+  /** 陪护人身份:家属 / 护士 */
+  companionKind?: CompanionKind;
   /** 已接听且看完完整内容(记入笔记本) */
   recorded: boolean;
 }

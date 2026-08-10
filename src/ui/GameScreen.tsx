@@ -46,7 +46,7 @@ function DebugBody({ snap, engine }: { snap: Snapshot; engine: GameEngine | null
       {aboard.map((t) => (
         <div key={t.id} className="debug-line">
           {kindIcon(t)} {t.title} → {t.targetFloor}F 等待 {t.wait}s
-          {t.companion ? ' (家属陪护)' : ''}
+          {t.companion ? ` (${t.companionKind === 'nurse' ? '护士陪护' : '家属陪护'})` : ''}
           {t.flavor ? ` [${t.flavor}]` : ''}
         </div>
       ))}
