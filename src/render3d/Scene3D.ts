@@ -3,13 +3,14 @@ import type { GameEngine } from '../engine/Engine';
 import { FLOOR_DEPTS_OF, FLOOR_NAME } from '../config';
 import { sfx } from '../engine/audio';
 import { arrow, canvasTexture, draw7seg, FONT_CN, FONT_PX, makeCanvas } from './canvasUtils';
-import { buildModelForKind, buildNurse, buildPerson, disposeGroup, M, PERSON_STYLES } from './models';
+import { buildModelForKind, buildNurse, buildPerson, disposeGroup, M, PERSON_STYLES, type PersonStyle } from './models';
 import type { Task, TaskView } from '../types';
 
 export interface SceneCallbacks {
   onPressFloor: (floor: number) => void;
   onPressRemind: () => void;
   onPressRight: () => void;
+  onPressSmile: () => void;
   onAnswer: () => void;
   onHangup: () => void;
   onOpenMap: () => void;
@@ -17,7 +18,7 @@ export interface SceneCallbacks {
 }
 
 /** 可交互对象的类型标识 */
-type HitType = 'floor' | 'answer' | 'hangup' | 'map' | 'notebook' | 'block' | 'ask' | 'remind' | 'right';
+type HitType = 'floor' | 'answer' | 'hangup' | 'map' | 'notebook' | 'block' | 'ask' | 'remind' | 'right' | 'smile';
 
 /** 轿厢地面网格(引擎侧):3 列 × 4 行,轿厢宽 3.9 与网格完全贴合 */
 const CELL_W = 1.3;
@@ -38,6 +39,20 @@ const pushOffsetOf = (rotY: number, flip = false): { x: number; z: number } => {
     z: -ox * Math.sin(rotY) + PUSH_OFFSET.z * Math.cos(rotY),
   };
 };
+/** 挑剔家属(拟真):粉色家属外观 */
+const CRITIC_STYLE: PersonStyle = { body: M.pink, bodyD: M.pinkD, hair: M.hairGray };
+/** 挑剔家属抱怨台词(头顶气泡循环播放) */
+const CRITIC_LINES = ['这个人真闲…', '就只用按电梯…', '现在的年轻人啊…'];
+
+/** 角色头顶气泡(按任务 id 独立 Sprite,多角色可同时显示) */
+interface RoleBubble {
+  sprite: THREE.Sprite;
+  tex: THREE.CanvasTexture;
+  /** 到期时间(performance.now,ms) */
+  until: number;
+  /** 气泡相对角色头部的高度(按角色类型固定) */
+  headY: number;
+}
 
 const R = 960 / 720; // 画布内部分辨率比(保持宽画布,轿厢本身收窄)
 
@@ -117,11 +132,11 @@ export class Scene3D {
   /** 家属走到面板按按钮的动画 */
   private familyAnim: { taskId: number; floor: number; phase: 'toPanel' | 'press' | 'back'; t: number } | null = null;
   private familyWalkTimer = 10;
-  /** 家属按按钮时的头顶气泡(动态文字) */
-  private walkBubble!: THREE.Sprite;
-  private walkBubbleTex!: THREE.CanvasTexture;
-  /** 问乘客楼层后的回复气泡到期时间 */
-  private askBubbleUntil = 0;
+  /** 角色头顶气泡池(任务 id → 气泡;多角色可同时显示) */
+  private bubbles = new Map<number, RoleBubble>();
+  /** 挑剔家属头顶抱怨气泡循环(拟真) */
+  private criticBubbleT = 2;
+  private criticLine = 0;
   /** 新上梯站立角色"先去按按钮再找位置"动画(按任务 id 独立推进,互不阻塞) */
   private pressFirstAnims = new Map<number, { target: number; phase: 'toPanel' | 'press' | 'toSpot'; t: number }>();
   private seenAboard = new Set<number>();
@@ -141,13 +156,13 @@ export class Scene3D {
   private hallDownMat!: THREE.MeshBasicMaterial;
   private hallDownLitMat!: THREE.MeshBasicMaterial;
 
-  // 家属人物(微笑服务警告)与叫骂声
+  // 家属人物(堵门者)与「别堵门!」按钮
   private angryGuy!: THREE.Group;
-  private warnSprite!: THREE.Sprite;
-  private scoldT = 0;
+  /** 挑剔家属头顶「😊 微笑服务」悬浮按钮(3D 场景内,点击即微笑) */
+  private smileBtn!: THREE.Sprite;
   private lastFrame = 0;
-  /** 堵门家属进场/离场动画(进场从走廊走进门洞,离场朝门外走或走到右侧骂人位) */
-  private blockAnim: { phase: 'enter' | 'exit'; t: number; exitMode?: 'side' | 'out' } | null = null;
+  /** 堵门家属进场/离场动画(进场从走廊走进门洞,离场朝门外走) */
+  private blockAnim: { phase: 'enter' | 'exit'; t: number } | null = null;
   private wasFamBlock = false;
   /** 家属被赶走后站在门外,等电梯离开楼层再清理(避免关门就消失的时序问题) */
   private hallWait: { floor: number } | null = null;
@@ -192,7 +207,7 @@ export class Scene3D {
     this.setNoDepth(this.remindGroup);
     this.setNoDepth(this.callBillboard);
     this.buildAngryGuy();
-    this.buildWalkBubble();
+    this.buildSmileBtn();
     this.scene.add(this.camera); // 相机入场景,其子节点(手机/笔记本/字幕窗)才会渲染
     this.bindEvents();
     this.lastTaskCount = engine.getTasks().length;
@@ -675,26 +690,25 @@ export class Scene3D {
     this.camera.add(g);
   }
 
-  /** 家属走到面板按按钮时的头顶气泡 */
-  private buildWalkBubble() {
-    const [c, ctx] = makeCanvas(320, 76);
+  /** 创建单个角色头顶气泡 Sprite(大尺寸画布,清晰易读;文字按需重绘) */
+  private createBubbleSprite(): { sprite: THREE.Sprite; tex: THREE.CanvasTexture } {
+    const [c, ctx] = makeCanvas(480, 120);
     ctx.fillStyle = 'rgba(30, 51, 70, 0.92)';
-    ctx.fillRect(0, 0, 320, 76);
+    ctx.fillRect(0, 0, 480, 120);
     ctx.strokeStyle = '#4dd0e1';
-    ctx.lineWidth = 5;
-    ctx.strokeRect(2.5, 2.5, 315, 71);
+    ctx.lineWidth = 7;
+    ctx.strokeRect(3.5, 3.5, 473, 113);
     ctx.fillStyle = '#fff';
-    ctx.font = FONT_CN(26);
+    ctx.font = FONT_CN(38);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('按楼层按钮…', 160, 39);
+    ctx.fillText('', 240, 61);
     const tex = canvasTexture(c);
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
-    sprite.scale.set(0.55, 0.13, 1);
+    sprite.scale.set(0.78, 0.195, 1);
     sprite.visible = false;
-    this.walkBubbleTex = tex;
-    this.walkBubble = sprite;
     this.scene.add(sprite);
+    return { sprite, tex };
   }
 
   /** 将道具设为最上层绘制:关闭深度读写 + 高渲染序,角色/墙壁永远盖不住手机与笔记本 */
@@ -713,49 +727,80 @@ export class Scene3D {
     });
   }
 
-  /** 显示动态气泡(重绘文字) */
-  private showBubble(text: string, x: number, y: number, z: number) {
-    const ctx = this.walkBubbleTex.image.getContext('2d')!;
-    const w = this.walkBubbleTex.image.width;
-    const h = this.walkBubbleTex.image.height;
+  /** 在指定角色头顶显示气泡(独立 Sprite,多角色互不覆盖);角色不存在返回 false */
+  showBubbleForTask(taskId: number, text: string, durationMs = 2500): boolean {
+    return this.bubbleAt(taskId, text, durationMs);
+  }
+
+  /** 显示/刷新指定角色的头顶气泡(定位到角色当前位置) */
+  private bubbleAt(taskId: number, text: string, durationMs: number): boolean {
+    const m = this.models.get(taskId) ?? this.companionModels.get(taskId);
+    if (!m) return false;
+    let b = this.bubbles.get(taskId);
+    if (!b) {
+      const made = this.createBubbleSprite();
+      b = { sprite: made.sprite, tex: made.tex, until: 0, headY: 1.95 };
+      this.bubbles.set(taskId, b);
+    }
+    const t = this.engine.getTasks().find((x) => x.id === taskId);
+    // 气泡位于角色头部上方(轮椅/床有明显偏移)
+    b.headY = t ? (t.kind === 'wheelchair' ? 1.5 : t.kind === 'bed' || t.kind === 'stretcher' ? 1.1 : 1.95) : 1.95;
+    this.drawBubble(b, text);
+    b.until = performance.now() + durationMs;
+    b.sprite.visible = true;
+    b.sprite.position.set(m.position.x, m.position.y + b.headY, m.position.z);
+    return true;
+  }
+
+  /** 重绘气泡文字(深底青框) */
+  private drawBubble(b: RoleBubble, text: string) {
+    const ctx = b.tex.image.getContext('2d')!;
+    const w = b.tex.image.width;
+    const h = b.tex.image.height;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = 'rgba(30, 51, 70, 0.92)';
     ctx.fillRect(0, 0, w, h);
     ctx.strokeStyle = '#4dd0e1';
-    ctx.lineWidth = 5;
-    ctx.strokeRect(2.5, 2.5, w - 5, h - 5);
+    ctx.lineWidth = 7;
+    ctx.strokeRect(3.5, 3.5, w - 7, h - 7);
     ctx.fillStyle = '#fff';
-    ctx.font = FONT_CN(26);
+    ctx.font = FONT_CN(38);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, w / 2, h / 2);
-    this.walkBubbleTex.needsUpdate = true;
-    this.walkBubble.visible = true;
-    this.walkBubble.position.set(x, y, z);
+    b.tex.needsUpdate = true;
   }
 
-  /** 家属人物 + 微笑服务警告(拟真模式抱怨时出现) */
+  /** 立即移除指定角色的气泡(如按键动画结束) */
+  private removeBubble(taskId: number) {
+    const b = this.bubbles.get(taskId);
+    if (!b) return;
+    b.sprite.visible = false;
+    this.scene.remove(b.sprite);
+    this.bubbles.delete(taskId);
+  }
+
+  /** 每帧推进角色气泡:跟随角色移动,到期或角色离场时移除 */
+  private updateBubbles() {
+    const now = performance.now();
+    for (const [taskId, b] of this.bubbles) {
+      const m = this.models.get(taskId) ?? this.companionModels.get(taskId);
+      if (!m || now > b.until) {
+        b.sprite.visible = false;
+        this.scene.remove(b.sprite);
+        this.bubbles.delete(taskId);
+        continue;
+      }
+      b.sprite.position.set(m.position.x, m.position.y + b.headY, m.position.z);
+    }
+  }
+
+  /** 家属人物(堵门者) + 「别堵门!」按钮(家属堵门时浮现在门口家属身上,点击取消堵门) */
   private buildAngryGuy() {
     this.angryGuy = buildPerson({ body: M.red, bodyD: M.redD, hair: M.hair });
     this.angryGuy.visible = false;
     this.scene.add(this.angryGuy);
 
-    const [wc, wctx] = makeCanvas(220, 72);
-    wctx.fillStyle = '#c92a2a';
-    wctx.fillRect(0, 0, 220, 72);
-    wctx.strokeStyle = '#fff';
-    wctx.lineWidth = 5;
-    wctx.strokeRect(2.5, 2.5, 215, 67);
-    wctx.fillStyle = '#fff';
-    wctx.font = FONT_CN(28);
-    wctx.textAlign = 'center';
-    wctx.textBaseline = 'middle';
-    wctx.fillText('😡 微笑!微笑!', 110, 36);
-    const warn = new THREE.Sprite(new THREE.SpriteMaterial({ map: canvasTexture(wc), transparent: true, depthWrite: false }));
-    warn.scale.set(1.1, 0.36, 1);
-    warn.visible = false;
-    this.warnSprite = warn;
-    this.scene.add(warn);
     // 「别堵门!」按钮(家属堵门时浮现在门口家属身上,点击取消堵门)
     // 高分辨率纹理 + 线性过滤,避免小尺寸下 Nearest 下采样导致文字变形;关闭深度测试避免被门框裁剪
     const [bc, bctx] = makeCanvas(400, 120);
@@ -779,6 +824,31 @@ export class Scene3D {
     this.blockBtn = block;
     this.interactives.push(block);
     this.scene.add(block);
+  }
+
+  /** 挑剔家属头顶「😊 微笑服务」悬浮按钮(3D 场景内点击即微笑,不占 HTML UI) */
+  private buildSmileBtn() {
+    const [sc, sctx] = makeCanvas(420, 120);
+    sctx.fillStyle = '#2b7a3e';
+    sctx.fillRect(0, 0, 420, 120);
+    sctx.strokeStyle = '#3fae5a';
+    sctx.lineWidth = 7;
+    sctx.strokeRect(3.5, 3.5, 413, 113);
+    sctx.fillStyle = '#fff';
+    sctx.font = FONT_CN(40);
+    sctx.textAlign = 'center';
+    sctx.textBaseline = 'middle';
+    sctx.fillText('😊 微笑服务', 210, 61);
+    const tex = canvasTexture(sc);
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    const btn = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false }));
+    btn.scale.set(0.8, 0.23, 1);
+    btn.visible = false;
+    btn.userData = { type: 'smile' as HitType };
+    this.smileBtn = btn;
+    this.interactives.push(btn);
+    this.scene.add(btn);
   }
 
   private buildPhone() {
@@ -1006,6 +1076,9 @@ export class Scene3D {
         case 'right':
           this.cbs.onPressRight();
           return;
+        case 'smile':
+          this.cbs.onPressSmile(); // 「😊 微笑服务」:挑剔家属点头微笑
+          return;
         case 'ask':
           this.askPassenger(ud.taskId!);
           return;
@@ -1116,17 +1189,6 @@ export class Scene3D {
     this.updateCallBillboard(frameDt);
 
     this.updatePassengers(frameDt);
-
-    // 家属叫骂声(微笑应急期间持续模拟)
-    if (this.engine.smileActive) {
-      this.scoldT -= frameDt;
-      if (this.scoldT <= 0) {
-        this.scoldT = 0.85;
-        sfx.scold();
-      }
-    } else {
-      this.scoldT = 0.4;
-    }
 
     this.renderer.render(this.scene, this.camera);
   }
@@ -1276,7 +1338,7 @@ export class Scene3D {
       m.position.x += (tx - m.position.x) * lerpK;
       m.position.z += (tz - m.position.z) * lerpK;
       if (this.hallAnim && this.hallAnim.taskId === t.id && this.hallAnim.phase !== 'back') {
-        this.showBubble(this.hallAnim.dir === 'up' ? '按上行 ▲' : '按下行 ▼', m.position.x, m.position.y + 1.85, m.position.z);
+        this.bubbleAt(t.id, this.hallAnim.dir === 'up' ? '按上行 ▲' : '按下行 ▼', 2500);
       }
       // 卧床病人候梯时,陪护已站在床头推床位(与病床一起进入轿厢,表现推床)
       // 第二张病床(靠墙侧)的陪护镜像到床尾侧,避免站进走廊墙里
@@ -1317,15 +1379,15 @@ export class Scene3D {
       const dur = { toBtn: 0.9, press: 0.4, back: 0.9 };
       if (a.t >= dur[a.phase]) {
         if (a.phase === 'toBtn') {
-          this.engine.familyHallPress(floor, a.dir); // 走到按钮:按下 ▲/▼
+          this.engine.familyHallPress(floor, a.dir, a.taskId); // 走到按钮:按下 ▲/▼
           a.phase = 'press';
           a.t = 0;
         } else if (a.phase === 'press') {
           a.phase = 'back';
           a.t = 0;
+          this.removeBubble(a.taskId); // 按键完成,气泡消失
         } else {
           this.hallAnim = null;
-          this.walkBubble.visible = false;
         }
       }
     }
@@ -1339,7 +1401,9 @@ export class Scene3D {
       if (!this.seenAboard.has(t.id) && t.kind === 'stand' && !this.pressFirstAnims.has(t.id)) {
         // 只按自己的目标楼层;已亮或已在目标层则无需按
         // (随机按其他楼层会让电梯停在没人要去的楼层)
-        if (Math.random() < 0.65 && t.targetFloor !== floor && !ev.lights.has(t.targetFloor)) {
+        // 挑剔家属必定自己按目标楼层:无人知道它要去哪,不按就到不了站、开除永不触发
+        const willPress = t.flavor === 'critic' || Math.random() < 0.65;
+        if (willPress && t.targetFloor !== floor && !ev.lights.has(t.targetFloor)) {
           this.pressFirstAnims.set(t.id, { target: t.targetFloor, phase: 'toPanel', t: 0 });
         }
       }
@@ -1381,7 +1445,7 @@ export class Scene3D {
       a.t += frameDt;
       if (a.t >= dur[a.phase]) {
         if (a.phase === 'toPanel') {
-          this.engine.familyPressButton(a.target); // 走到面板:按下
+          this.engine.familyPressButton(a.target, tid); // 走到面板:按下
           a.phase = 'press';
           a.t = 0;
         } else if (a.phase === 'press') {
@@ -1414,7 +1478,7 @@ export class Scene3D {
       // 陪护开始离梯:终止其走到面板按按钮的动画
       if (this.familyAnim && this.familyAnim.taskId === id) {
         this.familyAnim = null;
-        this.walkBubble.visible = false;
+        this.removeBubble(id);
       }
       const t = tasks.find((x) => x.id === id);
       const p = Math.min(1, (now - ex.start) / 1.1);
@@ -1473,21 +1537,22 @@ export class Scene3D {
       // 头顶气泡:走到面板与按下阶段显示
       const cm = this.companionModels.get(a.taskId);
       if (cm && a.phase !== 'back') {
-        this.showBubble('按楼层按钮…', cm.position.x, cm.position.y + 1.85, cm.position.z);
+        this.bubbleAt(a.taskId, '按楼层按钮…', 2500);
       } else {
-        this.walkBubble.visible = false;
+        this.removeBubble(a.taskId);
       }
       if (a.t >= dur[a.phase]) {
         if (a.phase === 'toPanel') {
-          this.engine.familyPressButton(a.floor); // 走到面板:按下按钮
+          this.engine.familyPressButton(a.floor, a.taskId); // 走到面板:按下按钮
           a.phase = 'press';
           a.t = 0;
         } else if (a.phase === 'press') {
           a.phase = 'back';
           a.t = 0;
+          this.removeBubble(a.taskId); // 按键完成,气泡消失
         } else {
           this.familyAnim = null;
-          this.walkBubble.visible = false;
+          this.removeBubble(a.taskId);
         }
       }
     }
@@ -1542,18 +1607,39 @@ export class Scene3D {
       }
     }
 
+    // 挑剔家属(拟真):上梯后头顶循环抱怨 + 「😊 微笑服务」悬浮按钮,直到微笑服务或到站
+    if (this.engine.criticActive) {
+      const critic = tasks.find((t) => t.flavor === 'critic' && t.status === 'aboard');
+      const cm = critic ? this.models.get(critic.id) : null;
+      if (cm && critic) {
+        this.criticBubbleT -= frameDt;
+        if (this.criticBubbleT <= 0) {
+          this.criticBubbleT = 2.2 + Math.random();
+          this.criticLine = (this.criticLine + 1) % CRITIC_LINES.length;
+          // 玩家事件气泡(如取消灯提示)优先:占用期间暂停循环台词,避免被立刻覆盖
+          const b = this.bubbles.get(critic.id);
+          if (!b || performance.now() >= b.until - 300) {
+            this.bubbleAt(critic.id, CRITIC_LINES[this.criticLine], 2200);
+          }
+        }
+        // 「😊 微笑服务」按钮:悬浮于挑剔家属躯干位置(transparent + depthTest 关闭,总是显示在角色前面)
+        this.smileBtn.visible = true;
+        this.smileBtn.position.set(cm.position.x, cm.position.y + 1.15, cm.position.z);
+      }
+    } else {
+      this.smileBtn.visible = false;
+    }
+
     // 家属堵门:角色站在电梯门口(特殊位置,不在电梯内),头顶出现「别堵门!」按钮
-    // 进场:从走廊(门洞外)走进门洞;离场:被赶走 → 朝门外走(电梯离开楼层后才清理),
-    // 拟真发难(自动妥协)→ 走到右侧骂人位
+    // 进场:从走廊(门洞外)走进门洞;离场:被赶走 → 朝门外走(电梯离开楼层后才清理)
     const famBlock = this.engine.familyActive;
-    const smile = this.engine.smileActive;
     if (famBlock && !this.wasFamBlock) {
       this.angryGuy.visible = true;
       this.angryGuy.position.set(0, 0, -1.1);
       this.angryGuy.rotation.y = Math.PI; // 面向轿厢走进来
       this.blockAnim = { phase: 'enter', t: 0 };
     } else if (!famBlock && this.wasFamBlock && this.angryGuy.visible && !this.blockAnim && !this.hallWait) {
-      this.blockAnim = { phase: 'exit', t: 0, exitMode: smile ? 'side' : 'out' };
+      this.blockAnim = { phase: 'exit', t: 0 };
     }
     this.wasFamBlock = famBlock;
     if (this.blockAnim) {
@@ -1570,25 +1656,18 @@ export class Scene3D {
           this.blockAnim = null;
         }
       } else {
-        // 离场:被赶走 → 走出门洞到走廊;拟真发难 → 走到右侧骂人
-        const to = a.exitMode === 'side' ? new THREE.Vector3(1.15, 0, 0.95) : new THREE.Vector3(0, 0, -1.35);
+        // 离场:被赶走 → 走出门洞到走廊
+        const to = new THREE.Vector3(0, 0, -1.35);
         this.angryGuy.position.lerpVectors(new THREE.Vector3(0, 0, 0.35), to, ease);
         if (p >= 1) {
-          if (a.exitMode === 'side') {
-            this.angryGuy.rotation.y = Math.PI; // 面向玩家骂人
-          } else {
-            this.angryGuy.rotation.y = 0; // 面向走廊,站到门外等电梯离开
-            this.hallWait = { floor: this.engine.elevator.floor };
-          }
+          this.angryGuy.rotation.y = 0; // 面向走廊,站到门外等电梯离开
+          this.hallWait = { floor: this.engine.elevator.floor };
           this.blockAnim = null;
         }
       }
     } else if (famBlock) {
       this.angryGuy.position.set(0, 0, 0.35); // 门口(门洞内,堵住进出)
       this.angryGuy.rotation.y = 0;
-    } else if (smile) {
-      this.angryGuy.position.set(1.15, 0, 0.95);
-      this.angryGuy.rotation.y = Math.PI;
     }
     // 站在门外的家属:电梯离开该楼层后才清理模型(而不是关门就清理,避免动画时序问题)
     if (this.hallWait) {
@@ -1598,24 +1677,13 @@ export class Scene3D {
         this.angryGuy.visible = false;
       }
     }
-    this.angryGuy.visible = this.angryGuy.visible && (famBlock || smile || this.blockAnim !== null || this.hallWait !== null);
+    this.angryGuy.visible = this.angryGuy.visible && (famBlock || this.blockAnim !== null || this.hallWait !== null);
     this.blockBtn.visible = famBlock && !this.blockAnim;
     if (this.blockBtn.visible) {
       this.blockBtn.position.set(0, 2.0, 0.35);
     }
-    this.warnSprite.visible = smile;
-    if (smile) {
-      const bob = Math.sin(now * 6) * 0.04;
-      this.warnSprite.position.set(this.angryGuy.position.x, 2.05 + bob, this.angryGuy.position.z);
-      this.warnSprite.scale.set(1.1 + Math.abs(Math.sin(now * 5)) * 0.15, 0.36, 1);
-    }
-    // 问话气泡到期隐藏(且没有其他动画占用)
-    if (this.askBubbleUntil > 0 && performance.now() > this.askBubbleUntil) {
-      this.askBubbleUntil = 0;
-      if (!this.familyAnim && !this.hallAnim && this.pressFirstAnims.size === 0) {
-        this.walkBubble.visible = false;
-      }
-    }
+    // 角色气泡:跟随角色移动,到期或角色离场时移除
+    this.updateBubbles();
   }
 
   /** 玩家点击乘客询问"你要去哪层" */
@@ -1629,7 +1697,7 @@ export class Scene3D {
     let text: string;
     switch (type) {
       case 'babbling':
-        text = '阿巴阿巴阿巴…';
+        text = '🤤 阿巴阿巴…';
         sfx.message();
         break;
       case 'ignore':
@@ -1647,16 +1715,18 @@ export class Scene3D {
         text = `我要去 ${t.targetFloor} 楼!`;
         sfx.message();
     }
-    // 气泡位于角色头部上方(轮椅/床有明显偏移)
-    const headY = t.kind === 'wheelchair' ? 1.5 : t.kind === 'bed' || t.kind === 'stretcher' ? 1.1 : 1.95;
-    this.showBubble(text, m.position.x, m.position.y + headY, m.position.z);
-    this.askBubbleUntil = performance.now() + 2400;
+    this.bubbleAt(taskId, text, 2400);
   }
 
   private modelFor(t: Task): THREE.Group {
     let m = this.models.get(t.id);
     if (!m) {
-      m = buildModelForKind(t.kind, PERSON_STYLES[t.id % PERSON_STYLES.length]);
+      // 挑剔家属(拟真):红色家属外观,与普通乘客区分
+      if (t.flavor === 'critic') {
+        m = buildPerson(CRITIC_STYLE);
+      } else {
+        m = buildModelForKind(t.kind, PERSON_STYLES[t.id % PERSON_STYLES.length]);
+      }
       m.userData = { type: 'ask' as HitType, taskId: t.id };
       this.models.set(t.id, m);
       this.interactives.push(m);

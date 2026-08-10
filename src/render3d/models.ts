@@ -15,6 +15,8 @@ export const M = {
   purpleD: '#8a5fc0',
   orange: '#f08a3c',
   orangeD: '#c96a24',
+  pink: '#f2a6bd',
+  pinkD: '#d97a99',
   white: '#eef1f6',
   gray: '#9aa5b1',
   grayD: '#5c6470',

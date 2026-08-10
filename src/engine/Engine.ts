@@ -9,19 +9,18 @@ import {
   DISPATCHER_COL,
   DISPATCHER_ROW,
   DOOR_HOLD,
-  FAMILY_BLOCK_TIME,
   FLOOR_NAME,
   GRID_COLS,
   GRID_ROWS,
   NATURAL_REPACK_TIME,
   NATURAL_REPACK_USED,
   PASSENGER_SIZE,
+  REFUSE_LINES,
   REMIND_COOLDOWN,
   REPACK_COMPLY,
   SAT_DECAY_NORMAL,
   SAT_DECAY_VIP,
   SAT_EXPIRED_PENALTY,
-  SMILE_TIME,
   WAIT_GRACE,
   timeScaleOf,
 } from '../config';
@@ -30,6 +29,8 @@ import type { Difficulty, ResultStats, Snapshot, Task, TaskView } from '../types
 /** 渲染目标接口(3D 场景实现) */
 export interface SceneRenderable {
   renderFrame(): void;
+  /** 角色头顶气泡(由场景定位角色显示);返回 false 表示未找到该角色(引擎退回顶部消息) */
+  showBubbleForTask?(taskId: number, text: string, durationMs?: number): boolean;
 }
 
 /** 游戏主引擎:持有全部可变状态,驱动 rAF 循环,向 React 推送快照 */
@@ -37,7 +38,7 @@ export class GameEngine {
   readonly diff: Difficulty;
   private readonly timeScale: number;
   readonly elevator: Elevator;
-  private readonly spawner = new Spawner();
+  private readonly spawner: Spawner;
 
   private tasks: Task[] = [];
   private idSeq = 1;
@@ -71,15 +72,18 @@ export class GameEngine {
 
   // 家属按键(自己按电梯按钮)与临时事件消息
   private familyLights = new Set<number>();
+  /** 家属按键的来源任务(楼层 → 任务 id,取消时在被取消家属头顶弹气泡) */
+  private familyLightOwner = new Map<number, number>();
   private eventSeq = 0;
   private eventMsg: { id: number; text: string } | null = null;
 
-  // 家属堵门(ICU 转运)
+  // 家属堵门(ICU 转运):堵住电梯直到玩家按「别堵门!」劝离,无超时
   private familyTask: Task | null = null;
-  private familyTimer = 0;
 
-  // 微笑应急(拟真模式)
-  private smileDeadline = 0;
+  /** 挑剔家属(拟真):在梯上指指点点的独立乘客,到站前未微笑服务即被开除 */
+  private criticTask: Task | null = null;
+  /** 挑剔家属未微笑到站:等离梯动画结束后的结算延迟(秒) */
+  private criticFireDelay = 0;
 
   // 来电编号(驱动来电提示)
   private callSeq = 0;
@@ -103,6 +107,7 @@ export class GameEngine {
     this.diff = diff;
     this.timeScale = timeScaleOf(diff);
     this.elevator = new Elevator(diff.floors);
+    this.spawner = new Spawner(diff.simulate);
   }
 
   // ─── 生命周期 ────────────────────────────────────────────────
@@ -155,12 +160,19 @@ export class GameEngine {
   // ─── 玩家输入 ────────────────────────────────────────────────
   pressFloor(floor: number) {
     if (this.phase !== 'playing') return;
-    // 取消家属自己按的需求 → 随机反应
+    // 挑剔家属(未微笑)的目标楼层不可取消:它到站前需要微笑服务,取消会导致开除机制失效
+    if (this.criticTask && this.criticTask.targetFloor === floor && this.elevator.lights.has(floor)) {
+      this.bubble(this.criticTask.id, '😤 挑剔家属:我就要去这层!');
+      return;
+    }
+    // 取消家属自己按的需求 → 随机反应(显示在被取消家属头顶)
     if (this.elevator.lights.has(floor) && this.familyLights.has(floor)) {
+      const ownerId = this.familyLightOwner.get(floor);
       this.familyLights.delete(floor);
+      this.familyLightOwner.delete(floor);
       if (this.elevator.press(floor)) {
         sfx.press();
-        this.familyCancelReaction(floor);
+        this.familyCancelReaction(floor, ownerId);
       }
       this.notify();
       return;
@@ -171,41 +183,43 @@ export class GameEngine {
     }
   }
 
-  /** 家属被取消后的随机反应:斥责 / 告知楼层 / 重新按键 */
-  private familyCancelReaction(floor: number) {
+  /** 家属被取消后的随机反应:斥责 / 告知楼层 / 重新按键(气泡挂在被取消家属头顶) */
+  private familyCancelReaction(floor: number, taskId?: number) {
     const r = Math.random();
     if (r < 0.34) {
       // 斥责玩家(稍微降低评价)
       this.satisfaction = Math.max(0, this.satisfaction - 3);
-      this.pushEvent('😠 家属:怎么给我取消了?!');
       sfx.angry();
+      this.bubble(taskId, '😠 家属:怎么给我取消了?!');
     } else if (r < 0.67) {
       // 与玩家沟通
-      this.pushEvent(`🗣 家属:我要去 ${floor} 楼!`);
       sfx.message();
+      this.bubble(taskId, `🗣 家属:我要去 ${floor} 楼!`);
     } else {
       // 重新按自己要去的楼层
       if (this.elevator.press(floor)) {
         this.familyLights.add(floor);
+        if (taskId !== undefined) this.familyLightOwner.set(floor, taskId);
         sfx.press();
-        this.pushEvent('👆 家属又按了一次按钮');
+        this.bubble(taskId, '👆 家属又按了一次按钮');
       }
     }
   }
 
   /** 家属自己按电梯按钮(陪护家属走到面板前按下;不取消已有需求) */
-  familyPressButton(floor: number) {
+  familyPressButton(floor: number, taskId?: number) {
     if (this.phase !== 'playing') return;
     if (this.elevator.lights.has(floor)) return;
     if (this.elevator.press(floor)) {
       this.familyLights.add(floor);
+      if (taskId !== undefined) this.familyLightOwner.set(floor, taskId);
       sfx.press();
       this.notify();
     }
   }
 
   /** 家属在电梯外按厅外呼叫按钮(▲/▼ 按需求方向,不取消已有需求) */
-  familyHallPress(floor: number, dir: 'up' | 'down') {
+  familyHallPress(floor: number, dir: 'up' | 'down', taskId?: number) {
     if (this.phase !== 'playing') return;
     if (this.elevator.hallCalls.has(floor)) return; // 已有呼叫
     if (!this.elevator.lights.has(floor)) {
@@ -213,6 +227,7 @@ export class GameEngine {
     }
     this.elevator.hallCalls.set(floor, dir);
     this.familyLights.add(floor);
+    if (taskId !== undefined) this.familyLightOwner.set(floor, taskId);
     sfx.press();
     this.notify();
   }
@@ -221,6 +236,16 @@ export class GameEngine {
     this.eventSeq++;
     this.eventMsg = { id: this.eventSeq, text };
     this.notify();
+  }
+
+  /** 角色头顶气泡(由 3D 场景定位角色显示);无来源角色或场景缺失时退回顶部消息 */
+  private bubble(taskId: number | undefined, text: string, durationMs = 2500) {
+    if (taskId === undefined) {
+      this.pushEvent(text);
+      return;
+    }
+    const shown = this.scene3d?.showBubbleForTask?.(taskId, text, durationMs) ?? false;
+    if (!shown) this.pushEvent(text);
   }
 
   /** 提醒乘客往里走 / 劝家属让开(指令重排:人往深处走,腾出门口) */
@@ -254,12 +279,14 @@ export class GameEngine {
     this.notify();
   }
 
-  /** 微笑应急(拟真模式) */
+  /** 微笑服务:挑剔家属(到站前)立即微笑解除;成功不影响满意度 */
   pressSmile() {
     if (this.phase !== 'playing') return;
-    if (this.smileDeadline > 0) {
-      this.smileDeadline = 0;
-      this.satisfaction = Math.min(100, this.satisfaction + 3);
+    if (this.criticTask) {
+      const taskId = this.criticTask.id;
+      this.criticTask = null;
+      // 感谢语显示在被服务家属头顶
+      this.bubble(taskId, '😊 家属:这还差不多!');
       sfx.success();
       this.notify();
     }
@@ -324,10 +351,10 @@ export class GameEngine {
       : this.spawner.update(dt, this.daySeconds, this.diff.floors, this.diff.emergencyGap, pendingNormal);
     for (const spec of specs) this.addTask(spec);
 
-    // 延迟来电送达
+    // 延迟来电送达(noCall 任务自己按电梯,不发来电,跳过)
     const now = Date.now() / 1000;
     for (const t of this.tasks) {
-      if (!t.callSent && now - t.createdAt >= t.callDelay) this.sendCall(t);
+      if (!t.callSent && !t.noCall && now - t.createdAt >= t.callDelay) this.sendCall(t);
     }
 
     // 电梯到站上下客(门开启期间逐帧处理,幂等)
@@ -362,29 +389,22 @@ export class GameEngine {
     }
     this.satisfaction = Math.max(0, Math.min(100, this.satisfaction - decay));
 
-    // 家属堵门计时
+    // 家属堵门:不赶走电梯就无法运行(保持开门,无超时;玩家按「别堵门!」劝离)
     if (this.familyTask) {
       const t = this.familyTask;
       if (ev.floor !== t.targetFloor || ev.doorState !== 'open') {
         // 电梯离开/关门:家属骂骂咧咧让开,到站自然送达
         this.familyTask = null;
       } else {
-        this.familyTimer -= dt;
         ev.doorTimer = Math.max(ev.doorTimer, 5); // 保持开门
-        if (this.familyTimer <= 0) {
-          this.familyTask = null;
-          this.deliver(t);
-          this.triggerSmile(); // 拟真:家属当场抱怨
-          sfx.fail();
-        }
       }
     }
 
-    // 微笑应急倒计时(未及时微笑 → 被拍照发微博提前下班)
-    if (this.smileDeadline > 0) {
-      this.smileDeadline -= dt;
-      if (this.smileDeadline <= 0) {
-        this.smileDeadline = 0;
+    // 挑剔家属未微笑到站:等其完全离开电梯(离梯动画约 1.1s)后再结算开除
+    if (this.criticFireDelay > 0) {
+      this.criticFireDelay -= dt;
+      if (this.criticFireDelay <= 0) {
+        this.criticFireDelay = 0;
         this.finishDay(true, '被开除了:态度不好被发到网上去了');
         return;
       }
@@ -408,7 +428,10 @@ export class GameEngine {
 
     // 清理已被服务(到达)的家属按键标记
     for (const f of [...this.familyLights]) {
-      if (!this.elevator.lights.has(f)) this.familyLights.delete(f);
+      if (!this.elevator.lights.has(f)) {
+        this.familyLights.delete(f);
+        this.familyLightOwner.delete(f);
+      }
     }
 
     this.elevator.update(dt);
@@ -419,19 +442,19 @@ export class GameEngine {
     if (ev.doorState !== 'open' || ev.moving) return;
     const F = ev.floor;
 
-    // 送达(家属堵门任务除外:先进入堵门流程)
+    // 送达(家属堵门任务除外:先进入堵门流程;堵门期间不送达,直到按「别堵门!」)
     let deliveredAny = false;
     for (const t of this.tasks) {
       if (t.status === 'aboard' && t.targetFloor === F) {
         if (t.flavor === 'family' && !t.familyBlocked) {
-          // 家属堵门开始
+          // 家属堵门开始(无限期,直到玩家按「别堵门!」)
           t.familyBlocked = true;
           this.familyTask = t;
-          this.familyTimer = FAMILY_BLOCK_TIME;
           sfx.crowd();
           this.notify();
           continue;
         }
+        if (this.familyTask === t) continue; // 堵门中:电梯无法运行,不送达
         this.deliver(t);
         deliveredAny = true;
       }
@@ -467,6 +490,10 @@ export class GameEngine {
         boardedAny = true;
         if (t.flavor === 'bang') {
           t.text += ' —— 工勤骂骂咧咧地把病人推进了电梯';
+        }
+        // 挑剔家属上梯:开始指指点点(头顶循环抱怨气泡),到站前不微笑服务即被开除
+        if (t.flavor === 'critic') {
+          this.criticTask = t;
         }
         sfx.ding();
       }
@@ -611,7 +638,7 @@ export class GameEngine {
       .sort((a, b) => a.id - b.id);
     const next = new Map<number, { col: number; row: number; w: number; h: number }>();
     // 1) 固定位:病床/担架、阿巴阿巴患者与不配合的乘客保持原位
-    let refused = 0;
+    const refusedIds = new Set<number>();
     for (const t of aboard) {
       const stays =
         t.kind === 'bed' ||
@@ -619,7 +646,7 @@ export class GameEngine {
         t.personality === 'babbling' ||
         Math.random() >= REPACK_COMPLY;
       if (stays) {
-        refused++;
+        refusedIds.add(t.id);
         const p = this.placements.get(t.id);
         if (p) next.set(t.id, p);
       }
@@ -650,13 +677,14 @@ export class GameEngine {
       if (spot) compNext.set(t.id, spot);
     }
     this.companions = compNext;
-    // 3) 反馈:指令完全没效果时解释原因(病床/担架不动是常态,不提示;阿巴阿巴与拒不听令才提示)
-    if (aboard.length > 0 && refused === aboard.length) {
-      if (aboard.some((t) => t.personality === 'babbling')) {
-        this.pushEvent('🤤 阿巴阿巴的患者没听懂,原地不动');
-      } else if (aboard.some((t) => t.kind !== 'bed' && t.kind !== 'stretcher' && t.personality !== 'babbling')) {
-        this.pushEvent('😤 乘客都不肯听你的指挥');
-      }
+    // 3) 反馈:不配合的乘客各自头顶气泡解释(病床/担架原地不动是常态,不提示)
+    for (const t of aboard) {
+      if (!refusedIds.has(t.id) || t.kind === 'bed' || t.kind === 'stretcher') continue;
+      const text =
+        t.personality === 'babbling'
+          ? '🤤 阿巴阿巴…'
+          : REFUSE_LINES[Math.floor(Math.random() * REFUSE_LINES.length)];
+      this.bubble(t.id, text);
     }
   }
 
@@ -696,6 +724,18 @@ export class GameEngine {
 
   /** 送达结算 */
   private deliver(t: Task) {
+    // 挑剔家属未微笑服务就到站离开:被拍照发网上,当场开除
+    // (先清理状态与占位,避免模型残留;结算延迟到其完全离开电梯的离梯动画之后)
+    if (t.flavor === 'critic' && this.criticTask === t) {
+      this.criticTask = null;
+      t.status = 'delivered';
+      this.elevator.used = Math.max(1, this.elevator.used - PASSENGER_SIZE[t.kind] - (t.companion ? 1 : 0));
+      this.placements.delete(t.id);
+      this.companions.delete(t.id);
+      this.criticFireDelay = 1.5;
+      return;
+    }
+    if (this.criticTask === t) this.criticTask = null;
     t.status = 'delivered';
     this.elevator.used = Math.max(1, this.elevator.used - PASSENGER_SIZE[t.kind] - (t.companion ? 1 : 0));
     this.placements.delete(t.id);
@@ -733,6 +773,7 @@ export class GameEngine {
       answeredAt: 0,
       companion: spec.companion,
       companionKind: spec.companionKind,
+      noCall: spec.noCall,
     };
     this.tasks.push(task);
     this.statTotal++;
@@ -747,6 +788,7 @@ export class GameEngine {
       }
       this.elevator.hallCalls.set(spec.fromFloor, dir);
       this.familyLights.add(spec.fromFloor);
+      this.familyLightOwner.set(spec.fromFloor, task.id);
       this.notify();
     } else if (spec.callDelay > 0) {
       // 工勤来电来得晚(电话迟迟才到)
@@ -766,14 +808,8 @@ export class GameEngine {
     this.notify();
   }
 
-  /** 拟真模式:家属/纠纷触发微笑应急 */
-  private triggerSmile() {
-    if (!this.diff.simulate || this.smileDeadline > 0 || this.phase !== 'playing') return;
-    this.smileDeadline = SMILE_TIME;
-    this.notify();
-  }
-
   private failTask(t: Task) {
+    if (this.criticTask === t) this.criticTask = null;
     t.status = 'failed';
     this.statFailed++;
     this.satisfaction = Math.max(0, this.satisfaction - SAT_EXPIRED_PENALTY);
@@ -878,10 +914,6 @@ export class GameEngine {
       error: this.lastError,
       simulate: this.diff.simulate,
       latestCallId: this.callSeq,
-      smile: {
-        active: this.smileDeadline > 0,
-        remaining: Math.max(0, Math.ceil(this.smileDeadline)),
-      },
       elevator: {
         floor: ev.floor,
         posY: ev.posY,
@@ -933,9 +965,9 @@ export class GameEngine {
     return this.familyTask !== null;
   }
 
-  /** 微笑应急进行中(拟真模式) */
-  get smileActive(): boolean {
-    return this.smileDeadline > 0;
+  /** 挑剔家属在梯上(拟真模式,到站前需微笑服务) */
+  get criticActive(): boolean {
+    return this.criticTask !== null;
   }
 
   floorName(floor: number): string {

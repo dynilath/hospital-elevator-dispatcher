@@ -8,21 +8,6 @@ function check(name: string, cond: boolean, extra = '') {
   if (!cond) failed++;
 }
 
-// ── 1. 微笑应急:超时 → 提前下班(微博原因) ──────────────────────
-{
-  const eng = new GameEngine({ floors: 10, emergencyGap: 55, dayMinutes: 8, simulate: true });
-  const e = eng as unknown as { smileDeadline: number; update(dt: number): void };
-  e.smileDeadline = 5;
-  for (let i = 0; i < 60; i++) e.update(0.05); // 3s
-  check('微笑倒计时在推进', e.smileDeadline < 5 && e.smileDeadline > 0, `d=${e.smileDeadline}`);
-  for (let i = 0; i < 60; i++) e.update(0.05); // 再 3s → 到期
-  const snap = eng.getSnapshot();
-  check('微笑超时 → 提前下班', snap.phase === 'result', snap.phase);
-  check('被开除不评级', snap.result?.endedEarly === true && snap.result?.grade === '-', `grade=${snap.result?.grade}`);
-  check('被开除标题', snap.result?.gradeName === '被开除了', snap.result?.gradeName ?? '');
-  check('被开除原因提示', snap.result?.endReason?.includes('被开除了') ?? false, snap.result?.endReason ?? '');
-}
-
 // ── 1.5 提前按「收工」:不计算评级,标记提前下班 ─────────────────
 {
   const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
@@ -33,29 +18,7 @@ function check(name: string, cond: boolean, extra = '') {
   check('提前收工提示文案', r?.endReason === '提前收工:你怎么能提前下班呢', r?.endReason ?? '');
 }
 
-// ── 2. 微笑应急:及时点击微笑 → 解除且继续 ───────────────────────
-{
-  const eng = new GameEngine({ floors: 10, emergencyGap: 55, dayMinutes: 8, simulate: true });
-  const e = eng as unknown as { smileDeadline: number; update(dt: number): void };
-  e.smileDeadline = 5;
-  eng.pressSmile();
-  const snap = eng.getSnapshot();
-  check('微笑后事件解除', !snap.smile.active && snap.phase === 'playing');
-  e.update(6); // 即使时间流逝也不触发结束
-  check('解除后不再触发结束', eng.getSnapshot().phase === 'playing');
-}
-
-// ── 3. 非拟真模式:不触发微笑 ───────────────────────────────────
-{
-  const eng = new GameEngine({ floors: 6, emergencyGap: 78, dayMinutes: 5, simulate: false });
-  (eng as unknown as { smileDeadline: number }).smileDeadline = 0;
-  // 模拟拥挤放弃事件来源:直接检查 triggerSmile 守卫
-  const before = eng.getSnapshot();
-  (eng as unknown as { triggerSmile(): void }).triggerSmile();
-  check('非拟真不激活微笑', eng.getSnapshot().smile.active === false && before.phase === 'playing');
-}
-
-// ── 4. 家属堵门:到站自动妥协 + 拟真触发微笑 ────────────────────
+// ── 2. 家属堵门:无限期堵门,不赶走电梯无法运行 ───────────────────
 {
   const eng = new GameEngine({ floors: 15, emergencyGap: 38, dayMinutes: 5, simulate: true });
   const e = eng as unknown as {
@@ -78,15 +41,22 @@ function check(name: string, cond: boolean, extra = '') {
   eng.elevator.moving = false;
   e.processDoors();
   check('家属堵门开始', e.familyTask !== null, String(e.familyTask !== null));
-  // 推进 7 秒 → 自动妥协
+  // 推进 7 秒:不按「别堵门!」→ 不送达、不超时、门保持开启
   for (let i = 0; i < 140; i++) e.update(0.05);
-  const snap = eng.getSnapshot();
   const task = e.tasks[0] as { status: string };
-  check('家属妥协后送达', task.status === 'delivered');
-  check('拟真:家属发难激活微笑', snap.smile.active, `smile=${JSON.stringify(snap.smile)}`);
+  check('堵门无超时:任务仍未送达', task.status === 'aboard', task.status);
+  check('堵门持续中(familyTask 未清)', e.familyTask !== null);
+  check(
+    '电梯门保持开启',
+    eng.elevator.doorState === 'open' || eng.elevator.doorState === 'opening',
+    eng.elevator.doorState,
+  );
+  // 按「别堵门!」→ 立即送达
+  eng.pressRemind();
+  check('按别堵门后立即送达', (e.tasks[0] as { status: string }).status === 'delivered');
 }
 
-// ── 5. 家属堵门:按提醒按钮立即劝离,不触发微笑 ──────────────────
+// ── 3. 家属堵门:按提醒按钮立即劝离 ─────────────────────────────
 {
   const eng = new GameEngine({ floors: 15, emergencyGap: 38, dayMinutes: 5, simulate: true });
   const e = eng as unknown as {
@@ -111,7 +81,38 @@ function check(name: string, cond: boolean, extra = '') {
   eng.pressRemind();
   const task = e.tasks[0] as { status: string };
   check('提醒后立即送达', task.status === 'delivered');
-  check('无微笑事件', !eng.getSnapshot().smile.active);
+}
+
+// ── 3.5 取消家属灯 → 角色头顶气泡(引擎通知场景定位角色) ────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const calls: { taskId: number; text: string }[] = [];
+  eng.attachScene({
+    renderFrame() {},
+    showBubbleForTask(taskId: number, text: string) {
+      calls.push({ taskId, text });
+      return true;
+    },
+  });
+  const rnd = Math.random;
+  // 家属(任务 77)按下 3F → 玩家取消 → 气泡挂在任务 77 头上
+  eng.familyPressButton(3, 77);
+  check('家属按键登记 3F', eng.elevator.lights.has(3));
+  Math.random = () => 0.1; // 命中"斥责"分支(满意度 -3)
+  eng.pressFloor(3);
+  Math.random = rnd;
+  check(
+    '取消灯反馈走角色气泡',
+    calls.length === 1 && calls[0].taskId === 77 && calls[0].text.includes('怎么给我取消了'),
+    JSON.stringify(calls),
+  );
+  check('气泡成功时不弹顶部消息', eng.getSnapshot().eventMsg === null);
+  // 无来源任务(旧调用/无头环境) → 退回顶部消息
+  eng.familyPressButton(4);
+  Math.random = () => 0.1;
+  eng.pressFloor(4);
+  Math.random = rnd;
+  check('无来源任务退回顶部消息', eng.getSnapshot().eventMsg !== null);
 }
 
 // ── 6. 恶作剧电话:到层无人 → 识破扣分;有真乘客则无事 ───────────
@@ -399,6 +400,9 @@ function check(name: string, cond: boolean, extra = '') {
   check('站立患者不打电话', task.callSent === false);
   check('自动登记厅外呼叫(下行)', eng.elevator.hallCalls.get(2) === 'down');
   check('内部按钮同步亮起', eng.elevator.lights.has(2));
+  // noCall 任务不得被「延迟来电」逻辑补发来电(既有 bug 回归)
+  e.update(0.1);
+  check('update 后仍无来电', task.callSent === false, `callSent=${task.callSent}`);
 }
 
 // ── 17. 指令重排(往里走走):病床与阿巴阿巴患者永远不动 ────────────
@@ -480,6 +484,45 @@ function check(name: string, cond: boolean, extra = '') {
   check('乘客不配合 → 原地不动', p?.col === 0 && p?.row === 0, `pos=${p?.col},${p?.row}`);
   check('全部不听 → 有提示消息', eng.getSnapshot().eventMsg !== null);
   Math.random = rnd;
+}
+
+// ── 19.5 指令重排:不配合的乘客各自头顶气泡(阿巴阿巴带 🤤) ─────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as {
+    tasks: unknown[];
+    placements: Map<number, { col: number; row: number; w: number; h: number }>;
+    companions: Map<number, { col: number; row: number }>;
+    repackByCommand(mode: 'deep' | 'right'): void;
+  };
+  const calls: { taskId: number; text: string }[] = [];
+  eng.attachScene({
+    renderFrame() {},
+    showBubbleForTask(taskId: number, text: string) {
+      calls.push({ taskId, text });
+      return true;
+    },
+  });
+  const mk = (id: number, kind: string, personality: string) => ({
+    id, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 2, kind,
+    status: 'aboard', createdAt: 0, deadline: 0, wait: 0, callDelay: 0, callSent: true, callSentAt: 0,
+    answered: false, answeredAt: 0, personality,
+  });
+  // 普通站立(teller) + 阿巴阿巴轮椅(babbling) + 病床(ignore,不动是常态)
+  e.tasks.push(mk(21, 'stand', 'teller'), mk(22, 'wheelchair', 'babbling'), mk(23, 'bed', 'ignore'));
+  e.placements.set(21, { col: 0, row: 0, w: 1, h: 1 });
+  e.placements.set(22, { col: 1, row: 0, w: 2, h: 2 });
+  e.placements.set(23, { col: 0, row: 1, w: 2, h: 2 });
+  const rnd = Math.random;
+  Math.random = () => 0.9; // 都不配合
+  e.repackByCommand('deep');
+  Math.random = rnd;
+  const babbling = calls.find((c) => c.taskId === 22);
+  const teller = calls.find((c) => c.taskId === 21);
+  const bed = calls.find((c) => c.taskId === 23);
+  check('阿巴阿巴患者弹 🤤 气泡', babbling?.text === '🤤 阿巴阿巴…', babbling?.text ?? '无');
+  check('普通不配合乘客弹台词气泡', !!teller && teller.text.startsWith('😤'), teller?.text ?? '无');
+  check('病床不动是常态,不弹气泡', bed === undefined);
 }
 
 // ── 20. 指令重排:不配合的家属陪护留在原位(不消失) ───────────────
@@ -659,6 +702,108 @@ function check(name: string, cond: boolean, extra = '') {
   const task = e.tasks[0] as { callSent: boolean; companion: boolean; companionKind: string };
   check('卧床病人 noCall 被忽略(必有电话通知)', task.callSent === true, `callSent=${task.callSent}`);
   check('companionKind 透传到任务', task.companion === true && task.companionKind === 'family', `${task.companionKind}`);
+}
+
+// ── 28. 挑剔家属:到站前未微笑服务 → 被拍照开除 ─────────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: true });
+  const e = eng as unknown as { tasks: unknown[]; processDoors(): void };
+  const now = Date.now() / 1000;
+  const mk = (id: number) => ({
+    id, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 4, kind: 'stand',
+    status: 'pending', createdAt: now, deadline: 0, wait: 0, callDelay: 0, callSent: true,
+    callSentAt: now, answered: true, answeredAt: now, flavor: 'critic', noCall: true,
+  });
+  e.tasks.push(mk(901));
+  eng.elevator.floor = 1;
+  eng.elevator.posY = 1;
+  eng.elevator.doorState = 'open';
+  eng.elevator.doorTimer = 5;
+  eng.elevator.moving = false;
+  e.processDoors();
+  check('挑剔家属上梯并激活', eng.criticActive, '');
+  // 电梯到目标层开门 → 未微笑 → 先送达,等离梯动画结束再开除
+  eng.elevator.floor = 4;
+  eng.elevator.posY = 4;
+  e.processDoors();
+  check('到站先送达(未立即结算)', eng.getSnapshot().phase === 'playing' && (e.tasks[0] as { status: string }).status === 'delivered', `phase=${eng.getSnapshot().phase}`);
+  for (let i = 0; i < 40; i++) eng.update(0.05); // 2s > 1.5s 延迟
+  const snap = eng.getSnapshot();
+  check('未微笑到站 → 完全离开后开除', snap.phase === 'result' && (snap.result?.endReason?.includes('被开除') ?? false), snap.result?.endReason ?? snap.phase);
+  check('开除后占位已清理', !eng.getPlacements().has(901) && !eng.getCompanionPlacements().has(901), `placements=${eng.getPlacements().size}`);
+}
+
+// ── 29. 挑剔家属:微笑服务解除 → 到站正常送达 ────────────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: true });
+  const e = eng as unknown as { tasks: unknown[]; processDoors(): void };
+  const calls: { taskId: number; text: string }[] = [];
+  eng.attachScene({
+    renderFrame() {},
+    showBubbleForTask(taskId: number, text: string) {
+      calls.push({ taskId, text });
+      return true;
+    },
+  });
+  const now = Date.now() / 1000;
+  e.tasks.push({
+    id: 902, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 4, kind: 'stand',
+    status: 'pending', createdAt: now, deadline: 0, wait: 0, callDelay: 0, callSent: true,
+    callSentAt: now, answered: true, answeredAt: now, flavor: 'critic',
+  });
+  eng.elevator.floor = 1;
+  eng.elevator.posY = 1;
+  eng.elevator.doorState = 'open';
+  eng.elevator.doorTimer = 5;
+  eng.elevator.moving = false;
+  e.processDoors();
+  check('挑剔家属已激活', eng.criticActive);
+  // 挑剔家属(未微笑)的目标楼层不可取消(否则开除机制失效)
+  eng.elevator.lights.add(4);
+  eng.familyLights.add(4);
+  eng.pressFloor(4);
+  check('挑剔家属目标灯不可取消', eng.elevator.lights.has(4), `lights=${Array.from(eng.elevator.lights)}`);
+  eng.satisfaction = 90; // 便于断言"微笑服务不影响满意度"
+  const before = eng.getSnapshot().satisfaction;
+  eng.pressSmile();
+  check('微笑服务解除挑剔家属', !eng.criticActive, '');
+  check('微笑服务不影响满意度', eng.getSnapshot().satisfaction === before, `${before}->${eng.getSnapshot().satisfaction}`);
+  check(
+    '微笑感谢语走角色头顶气泡',
+    calls.some((c) => c.taskId === 902 && c.text.includes('这还差不多')),
+    JSON.stringify(calls),
+  );
+  eng.elevator.floor = 4;
+  eng.elevator.posY = 4;
+  e.processDoors();
+  const snap = eng.getSnapshot();
+  check('微笑后到站正常送达', snap.phase === 'playing' && (e.tasks[0] as { status: string }).status === 'delivered', `${snap.phase} ${(e.tasks[0] as { status: string }).status}`);
+}
+
+// ── 30. 挑剔家属生成:拟真专属,非拟真不出现 ─────────────────────
+{
+  const plain = new Spawner();
+  let criticCount = 0;
+  for (let i = 0; i < 200; i++) {
+    if (plain.makeCall(8).flavor === 'critic') criticCount++;
+  }
+  check('非拟真不生成挑剔家属', criticCount === 0, `c=${criticCount}`);
+  // 拟真:固定随机序列命中挑剔家属分支
+  // [critic roll=0.0(<0.08), from pick, to pick, deptOf(from), deptOf(to)]
+  const sim = new Spawner(true);
+  const orig = Math.random;
+  let i = 0;
+  const seq = [0.0, 0.5, 0.5, 0.5, 0.5];
+  Math.random = () => seq[i++ % seq.length];
+  try {
+    const spec = sim.makeCall(8);
+    check('拟真生成挑剔家属任务', spec.flavor === 'critic' && spec.kind === 'stand', `flavor=${spec.flavor}`);
+    check('挑剔家属目标楼层不同于出发层', spec.fromFloor !== spec.targetFloor, `${spec.fromFloor}->${spec.targetFloor}`);
+    check('挑剔家属不发手机提示(noCall)', spec.noCall === true, `noCall=${spec.noCall}`);
+    check('挑剔家属文本带抱怨台词', spec.text.includes('真闲') && spec.text.includes('按电梯'), spec.text);
+  } finally {
+    Math.random = orig;
+  }
 }
 
 console.log(failed === 0 ? '\n== ALL PASS ==' : `\n== ${failed} FAILED ==`);

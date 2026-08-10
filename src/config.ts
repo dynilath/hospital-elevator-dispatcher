@@ -73,6 +73,8 @@ export const DOOR_HOLD = 1.1;
 export const REMIND_COOLDOWN = 10;
 /** 指令重排时乘客配合的概率(病床/担架与阿巴阿巴患者永远不配合) */
 export const REPACK_COMPLY = 0.7;
+/** 不配合乘客的头顶气泡台词(随机一句) */
+export const REFUSE_LINES = ['😤 烦不烦,我就站这里', '😤 就不挪,就站这', '😤 别指挥我'];
 /** 被拥挤阻塞后乘客放弃等待的时限(秒) */
 export const BLOCK_GIVE_UP = 15;
 
@@ -99,10 +101,6 @@ export const SAT_DECAY_NORMAL = 0.22;
 export const SAT_DECAY_VIP = 1;
 /** 超时失败固定满意度损失 */
 export const SAT_EXPIRED_PENALTY = 12;
-/** 家属堵门持续时长(秒) */
-export const FAMILY_BLOCK_TIME = 6;
-/** 微笑应急时限(秒) */
-export const SMILE_TIME = 5;
 
 // ─── 难度预设与自定义选项 ───────────────────────────────────────
 export interface DifficultyPreset {

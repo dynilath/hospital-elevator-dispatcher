@@ -99,12 +99,35 @@ function wards(floors: number): number[] {
 
 /** 任务生成器 */
 export class Spawner {
+  /** 拟真模式:生成「挑剔家属」剧情(指指点点,到站前需微笑服务) */
+  constructor(private readonly simulate = false) {}
+
   // 初始值以「任务单位」计:1 单位 ≈ NORMAL_INTERVAL×峰值倍率 秒
   private nextNormal = 0.4;
   private nextEmergency = 0.8;
 
-  /** 普通呼叫(含领导/骚扰/工勤剧情) */
+  /** 普通呼叫(含领导/骚扰/工勤/挑剔家属剧情) */
   makeCall(floors: number): TaskSpec {
+    // 拟真专属:挑剔家属(指指点点的独立乘客,不发手机提示,自己按电梯;到站前不微笑服务即被开除)
+    // 拟真专属:挑剔家属(指指点点的独立乘客,不发手机提示,自己按电梯;到站前不微笑服务即被开除)
+    if (this.simulate && Math.random() < 0.08) {
+      const from = pick(Array.from({ length: floors }, (_, i) => i + 1));
+      const targets = Array.from({ length: floors }, (_, i) => i + 1).filter((f) => f !== from);
+      const to = pick(targets);
+      return {
+        type: 'normal',
+        title: deptOf(from),
+        text: `😤 挑剔家属要乘电梯去 ${deptOf(to)},她说别人"真闲""只会按电梯"!你注意点!`,
+        fromFloor: from,
+        targetFloor: to,
+        kind: 'stand',
+        deadline: 0,
+        flavor: 'critic',
+        callDelay: 0,
+        noCall: true,
+      };
+    }
+
     const wardsList = wards(floors);
     const ward = wardsList.length > 0 ? pick(wardsList) : null;
     const name = maskedName();

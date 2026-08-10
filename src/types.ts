@@ -25,7 +25,7 @@ export interface Difficulty {
 }
 
 /** 剧情电话类型 */
-export type TaskFlavor = 'vip' | 'prank' | 'bang' | 'family';
+export type TaskFlavor = 'vip' | 'prank' | 'bang' | 'family' | 'critic';
 
 /** 陪护人身份:家属(普通病床) / 护士(急救床) */
 export type CompanionKind = 'family' | 'nurse';
@@ -66,6 +66,8 @@ export interface Task {
   companion?: boolean;
   /** 陪护人身份:家属 / 护士(决定模型与文案) */
   companionKind?: CompanionKind;
+  /** 不发手机来电(乘客/挑剔家属自己按电梯);延迟来电检查须跳过此类任务 */
+  noCall?: boolean;
   /** 家属堵门:送达前需先劝离家属 */
   familyBlocked?: boolean;
   /** 角色固有性格(上车时确定):teller 正常告知 / babbling 阿巴阿巴 / grumpy 不耐烦 / mute 沉默 / ignore 卧床无回应 */
@@ -124,13 +126,6 @@ export interface ElevatorView {
   familyBlocked: boolean;
 }
 
-/** 微笑应急事件(拟真模式) */
-export interface SmileEvent {
-  active: boolean;
-  /** 剩余秒数 */
-  remaining: number;
-}
-
 /** 结算统计 */
 export interface ResultStats {
   satisfaction: number;
@@ -167,8 +162,6 @@ export interface Snapshot {
   simulate: boolean;
   /** 最新一次来电编号(用于来电提示) */
   latestCallId: number;
-  /** 微笑应急事件 */
-  smile: SmileEvent;
   /** 临时事件消息(家属斥责/告知等) */
   eventMsg: { id: number; text: string } | null;
   elevator: ElevatorView;
