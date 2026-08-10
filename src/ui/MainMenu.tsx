@@ -32,7 +32,19 @@ export default function MainMenu({ onStart }: Props) {
         <div className="menu-title">
           <div className="title-main">🏥 医院电梯调度员</div>
           <div className="title-sub px-num">HOSPITAL ELEVATOR DISPATCHER</div>
-          <div className="title-ver px-num">v{pkg.version}</div>
+          <div className="title-ver px-num">
+            <div>v{pkg.version}</div>
+            <div className="ver-by">
+              by dynilath -{' '}
+              <a
+                href="https://github.com/dynilath/hospital-elevator-dispatcher"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                github
+              </a>
+            </div>
+          </div>
         </div>
 
         <div className="preset-row">

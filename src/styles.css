@@ -90,6 +90,23 @@ body {
   opacity: 0.75;
 }
 
+.title-ver a {
+  color: var(--ink-dim);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--panel-border);
+}
+
+.title-ver a:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* 作者行:人名与链接不随版本号拉宽字距 */
+.title-ver .ver-by {
+  letter-spacing: 0;
+  margin-top: 2px;
+}
+
 .preset-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
