@@ -17,7 +17,7 @@ export default function MainMenu({ onStart }: Props) {
   const [mode, setMode] = useState<'easy' | 'normal' | 'hard' | 'sim' | 'custom'>('normal');
   const [floors, setFloors] = useState(10);
   const [emgIdx, setEmgIdx] = useState(1);
-  const [dayMinutes, setDayMinutes] = useState(8);
+  const [dayMinutes, setDayMinutes] = useState(5);
   const [simulate, setSimulate] = useState(false);
 
   const difficulty: Difficulty =
@@ -111,11 +111,12 @@ export default function MainMenu({ onStart }: Props) {
           <summary>📖 玩法说明</summary>
           <ul>
             <li>你是电梯里的调度员,一天的工作从 <b>8:00</b> 到 <b>17:00</b> 结束。</li>
-            <li>第一人称视角:<b>按住拖拽</b>环视轿厢,<b>点击</b>道具交互。</li>
-            <li>📱 所有通知都通过<b>手机</b>来电(右下角道具):点击接听,内容在<b>悬浮窗</b>打字+音效播报;任务记录在右下角的<b>📓 调度笔记本</b>里。</li>
+            <li>第一人称视角:<b>按住拖拽</b>环视轿厢,<b>点击</b>道具与乘客交互。</li>
+            <li>📱 通知通过<b>手机</b>来电(右下角):点「接听」在悬浮窗打字播报,点「挂断」结束;任务记录在旁边的<b>📋 调度夹板</b>里。</li>
             <li>🚨 <b>紧急任务</b>带倒计时,急救床可直接上梯,优先处理!超时会重罚。</li>
-            <li>🛏️ 卧床患者、♿ 轮椅乘客上下梯较慢;高峰时段拥挤时按面板<b>「📢 请往里走走」</b>。</li>
-            <li>按钮旁的<b>「医院楼层分布」贴画</b>可点开查看各层科室与呼叫灯(一层可有多个科室)。</li>
+            <li>🛏️ 卧床患者、♿ 轮椅乘客上下梯较慢;拥挤时用左下角<b>「📢 往里走走」/「➡ 靠右站站」</b>让人挪位——乘客不一定会听,病床与「阿巴阿巴」的患者永远不动。</li>
+            <li>点击乘客可以<b>问目的地</b>;有的家属会堵门,点他头顶的<b>「🚫 别堵门!」</b>劝走。</li>
+            <li>按钮旁的<b>「医院楼层分布」贴画</b>可点开查看各层科室。</li>
             <li>🎭 <b>拟真难度</b>:来电不留记录需自行记忆;遇到家属抱怨要限时「微笑」,否则被拍下发微博提前下班。</li>
           </ul>
         </details>

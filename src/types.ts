@@ -63,6 +63,8 @@ export interface Task {
   companion?: boolean;
   /** 家属堵门:送达前需先劝离家属 */
   familyBlocked?: boolean;
+  /** 角色固有性格(上车时确定):teller 正常告知 / babbling 阿巴阿巴 / grumpy 不耐烦 / mute 沉默 / ignore 卧床无回应 */
+  personality?: 'teller' | 'babbling' | 'grumpy' | 'mute' | 'ignore';
 }
 
 /** 消息面板用的任务视图 */
@@ -124,7 +126,6 @@ export interface SmileEvent {
 
 /** 结算统计 */
 export interface ResultStats {
-  score: number;
   satisfaction: number;
   grade: string;
   gradeName: string;
@@ -142,10 +143,11 @@ export interface ResultStats {
 /** 引擎推送给 React 的完整快照 */
 export interface Snapshot {
   phase: 'playing' | 'result';
-  /** 游戏内时钟文本 08:42 */
+  /** 剩余时间倒计时文本 mm:ss */
   dayText: string;
+  /** 加班阶段(倒计时结束,服务完所有角色才结束) */
+  overtime: boolean;
   satisfaction: number;
-  score: number;
   total: number;
   done: number;
   emgTotal: number;

@@ -9,6 +9,7 @@ import type { Task, TaskView } from '../types';
 export interface SceneCallbacks {
   onPressFloor: (floor: number) => void;
   onPressRemind: () => void;
+  onPressRight: () => void;
   onAnswer: () => void;
   onHangup: () => void;
   onOpenMap: () => void;
@@ -16,7 +17,7 @@ export interface SceneCallbacks {
 }
 
 /** 可交互对象的类型标识 */
-type HitType = 'floor' | 'answer' | 'hangup' | 'map' | 'notebook' | 'block' | 'ask';
+type HitType = 'floor' | 'answer' | 'hangup' | 'map' | 'notebook' | 'block' | 'ask' | 'remind' | 'right';
 
 /** 轿厢地面网格(引擎侧):3 列 × 4 行,轿厢宽 3.9 与网格完全贴合 */
 const CELL_W = 1.3;
@@ -25,8 +26,8 @@ const cellCenter = (col: number, row: number, w: number, h: number): { x: number
   x: -1.3 + col * CELL_W + ((w - 1) * CELL_W) / 2,
   z: 0.8 + row * CELL_D + ((h - 1) * CELL_D) / 2,
 });
-/** 家属按面板按钮时的站位(面板前) */
-const PANEL_STAND = { x: 1.6, z: 2.5 };
+/** 家属按面板按钮时的站位(面板前、更靠近电梯门,避免贴到镜头) */
+const PANEL_STAND = { x: 1.55, z: 1.75 };
 
 const R = 960 / 720; // 画布内部分辨率比(保持宽画布,轿厢本身收窄)
 
@@ -52,13 +53,15 @@ export class Scene3D {
   // 交互
   private interactives: THREE.Object3D[] = [];
   private hovered: THREE.Object3D | null = null;
+  /** 当前 hover 放大对象(保存原始缩放,离开时恢复) */
+  private hoverScale: { obj: THREE.Object3D; orig: THREE.Vector3 } | null = null;
 
   // 门(三层结构:厅门 + 轿厢门,同向滑动)
   private doorPanels: THREE.Mesh[] = [];
 
-  // 楼层指示(门上大数码管 + 后墙小指示,均锚定场景)
+  // 楼层指示(门上大数码管 + 按钮面板上方 7 段指示,均锚定场景)
   private indicatorMat!: THREE.MeshBasicMaterial;
-  private backIndicatorMat!: THREE.MeshBasicMaterial;
+  private panelSegMat!: THREE.MeshBasicMaterial;
   private lastFloor = -1;
   private lastDir = 0;
 
@@ -69,6 +72,12 @@ export class Scene3D {
   private phoneGroup!: THREE.Group;
   /** 调度笔记本(手持道具,与手机并排位于视野右下角) */
   private notebookGroup!: THREE.Group;
+  /** 调度指令面板(手持道具,含「往里走走」「靠右站站」按钮) */
+  private remindGroup!: THREE.Group;
+  private remindBtnTex!: THREE.CanvasTexture;
+  private rightBtnTex!: THREE.CanvasTexture;
+  private lastRemindReady: boolean | null = null;
+  private lastRemindCd = -1;
   private answerMat!: THREE.MeshLambertMaterial;
   private hangupMat!: THREE.MeshLambertMaterial;
   private lastTaskCount = 0;
@@ -88,6 +97,8 @@ export class Scene3D {
   private litMats: THREE.MeshLambertMaterial[] = [];
   /** 楼层按钮 hover 蓝色边框 */
   private hoverOutlines: THREE.Mesh[] = [];
+  /** 贴画 hover 蓝色边框(与楼层按钮一致) */
+  private posterOutline!: THREE.Mesh;
 
   // 乘客模型池(位置由引擎网格占位决定,平滑移动)
   private models = new Map<number, THREE.Group>();
@@ -104,13 +115,14 @@ export class Scene3D {
   /** 新上梯站立角色"先去按按钮再找位置"动画 */
   private pressFirstAnim: { taskId: number; target: number; phase: 'toPanel' | 'press' | 'toSpot'; t: number } | null = null;
   private seenAboard = new Set<number>();
+  /** 离梯动画:病人先位移到电梯外再移除 */
+  private exiting = new Map<number, { start: number; fromMain: THREE.Vector3; fromComp: THREE.Vector3 | null }>();
   /** 家属堵门角色(位于电梯门口)与"别堵门!"按钮 */
   private blockBtn!: THREE.Sprite;
   /** 等待家属在电梯外按厅外按钮(▲/▼)的动画 */
   private hallAnim: { taskId: number; dir: 'up' | 'down'; phase: 'toBtn' | 'press' | 'back'; t: number } | null = null;
   private hallWalkTimer = 8;
-  /** 电梯按钮面板上方的运行状态指示 */
-  private panelDirMat!: THREE.MeshBasicMaterial;
+
   /** 厅外呼叫按钮(走廊侧,▲上行 / ▼下行) */
   private hallUpBtn!: THREE.Mesh;
   private hallDownBtn!: THREE.Mesh;
@@ -124,6 +136,9 @@ export class Scene3D {
   private warnSprite!: THREE.Sprite;
   private scoldT = 0;
   private lastFrame = 0;
+  /** 堵门家属进场/离场动画(进场从走廊走进门洞,离场走到右侧微笑位) */
+  private blockAnim: { phase: 'enter' | 'exit'; t: number } | null = null;
+  private wasFamBlock = false;
 
   private disposed = false;
 
@@ -150,10 +165,15 @@ export class Scene3D {
 
     this.buildCabin();
     this.buildPhone();
+    this.buildRemindDevice();
     this.buildCallBillboard();
-    this.buildNotebook();
+    if (!this.engine.diff.simulate) {
+      // 拟真难度:不提供笔记本(无显示、无点击位)
+      this.buildNotebook();
+      this.setNoDepth(this.notebookGroup);
+    }
     this.setNoDepth(this.phoneGroup);
-    this.setNoDepth(this.notebookGroup);
+    this.setNoDepth(this.remindGroup);
     this.setNoDepth(this.callBillboard);
     this.buildAngryGuy();
     this.buildWalkBubble();
@@ -359,41 +379,41 @@ export class Scene3D {
     // 厅外呼叫按钮(走廊右墙,透过门可见):▲ 上行 / ▼ 下行
     const hallBtn = (arrowUp: boolean): [HTMLCanvasElement, THREE.CanvasTexture, THREE.CanvasTexture] => {
       const color = arrowUp ? '#3fae5a' : '#f08a3c';
-      const [c1, c1x] = makeCanvas(64, 64);
+      const [c1, c1x] = makeCanvas(96, 96);
       c1x.fillStyle = '#1e3346';
-      c1x.fillRect(0, 0, 64, 64);
+      c1x.fillRect(0, 0, 96, 96);
       c1x.strokeStyle = color;
-      c1x.lineWidth = 4;
-      c1x.strokeRect(2, 2, 60, 60);
+      c1x.lineWidth = 6;
+      c1x.strokeRect(3, 3, 90, 90);
       c1x.fillStyle = color;
       c1x.beginPath();
       if (arrowUp) {
-        c1x.moveTo(32, 14);
-        c1x.lineTo(50, 38);
-        c1x.lineTo(14, 38);
+        c1x.moveTo(48, 20);
+        c1x.lineTo(76, 58);
+        c1x.lineTo(20, 58);
       } else {
-        c1x.moveTo(14, 26);
-        c1x.lineTo(50, 26);
-        c1x.lineTo(32, 50);
+        c1x.moveTo(20, 38);
+        c1x.lineTo(76, 38);
+        c1x.lineTo(48, 76);
       }
       c1x.closePath();
       c1x.fill();
-      const [c2, c2x] = makeCanvas(64, 64);
+      const [c2, c2x] = makeCanvas(96, 96);
       c2x.fillStyle = arrowUp ? '#2b7a3e' : '#7a3f14';
-      c2x.fillRect(0, 0, 64, 64);
+      c2x.fillRect(0, 0, 96, 96);
       c2x.strokeStyle = arrowUp ? '#7dffa8' : '#ffc46b';
-      c2x.lineWidth = 5;
-      c2x.strokeRect(2, 2, 60, 60);
+      c2x.lineWidth = 7;
+      c2x.strokeRect(3, 3, 90, 90);
       c2x.fillStyle = arrowUp ? '#7dffa8' : '#ffc46b';
       c2x.beginPath();
       if (arrowUp) {
-        c2x.moveTo(32, 14);
-        c2x.lineTo(50, 38);
-        c2x.lineTo(14, 38);
+        c2x.moveTo(48, 20);
+        c2x.lineTo(76, 58);
+        c2x.lineTo(20, 58);
       } else {
-        c2x.moveTo(14, 26);
-        c2x.lineTo(50, 26);
-        c2x.lineTo(32, 50);
+        c2x.moveTo(20, 38);
+        c2x.lineTo(76, 38);
+        c2x.lineTo(48, 76);
       }
       c2x.closePath();
       c2x.fill();
@@ -440,36 +460,36 @@ export class Scene3D {
     const bw = 0.42;
     const bh = 0.13;
     for (let f = 1; f <= N; f++) {
-      const [c, ctx] = makeCanvas(176, 48);
+      const [c, ctx] = makeCanvas(264, 72);
       // 常规态
       ctx.fillStyle = '#232838';
-      ctx.fillRect(0, 0, 176, 48);
+      ctx.fillRect(0, 0, 264, 72);
       ctx.strokeStyle = '#4a5168';
-      ctx.lineWidth = 3;
-      ctx.strokeRect(1.5, 1.5, 173, 45);
+      ctx.lineWidth = 4;
+      ctx.strokeRect(2, 2, 260, 68);
       ctx.fillStyle = '#ffd34d';
-      ctx.font = FONT_PX(16);
+      ctx.font = FONT_PX(24);
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(String(f), 12, 16);
+      ctx.fillText(String(f), 16, 24);
       ctx.fillStyle = '#c9d1e0';
-      ctx.font = FONT_CN(13);
-      ctx.fillText(shortName(FLOOR_NAME(f)), 50, 17);
+      ctx.font = FONT_CN(20);
+      ctx.fillText(shortName(FLOOR_NAME(f)), 74, 25);
       // 亮灯态
-      const [c2, ctx2] = makeCanvas(176, 48);
+      const [c2, ctx2] = makeCanvas(264, 72);
       ctx2.fillStyle = '#3a3420';
-      ctx2.fillRect(0, 0, 176, 48);
+      ctx2.fillRect(0, 0, 264, 72);
       ctx2.strokeStyle = '#ffd34d';
-      ctx2.lineWidth = 3;
-      ctx2.strokeRect(1.5, 1.5, 173, 45);
+      ctx2.lineWidth = 4;
+      ctx2.strokeRect(2, 2, 260, 68);
       ctx2.fillStyle = '#ffe27a';
-      ctx2.font = FONT_PX(16);
+      ctx2.font = FONT_PX(24);
       ctx2.textAlign = 'left';
       ctx2.textBaseline = 'middle';
-      ctx2.fillText(String(f), 12, 16);
+      ctx2.fillText(String(f), 16, 24);
       ctx2.fillStyle = '#fff';
-      ctx2.font = FONT_CN(13);
-      ctx2.fillText(shortName(FLOOR_NAME(f)), 50, 17);
+      ctx2.font = FONT_CN(20);
+      ctx2.fillText(shortName(FLOOR_NAME(f)), 74, 25);
 
       const mat = new THREE.MeshLambertMaterial({ map: canvasTexture(c) });
       const litMat = new THREE.MeshLambertMaterial({ map: canvasTexture(c2) });
@@ -512,69 +532,60 @@ export class Scene3D {
       this.scene.add(hoverOutline);
     }
 
-    // 电梯按钮面板上方的运行状态指示(与轿厢墙壁平面完全平行)
-    const [pc] = makeCanvas(220, 48);
-    const ptex = canvasTexture(pc);
-    const dirMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.86, 0.19), new THREE.MeshBasicMaterial({ map: ptex }));
-    dirMesh.position.set(1.86, 2.52, 2.35);
-    dirMesh.rotation.y = -Math.PI / 2;
-    this.panelDirMat = dirMesh.material as THREE.MeshBasicMaterial;
-    this.panelDirMat.map = ptex;
-    this.scene.add(dirMesh);
   }
 
   private buildIndicator() {
     // 门上大指示(面向轿厢)
-    const [c] = makeCanvas(460, 40);
+    const [c] = makeCanvas(640, 56);
     const tex = canvasTexture(c);
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2.3, 0.2), new THREE.MeshBasicMaterial({ map: tex }));
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 0.21), new THREE.MeshBasicMaterial({ map: tex }));
     mesh.position.set(0, 2.5, 0.055);
     this.indicatorMat = mesh.material as THREE.MeshBasicMaterial;
     this.indicatorMat.map = tex;
     this.scene.add(mesh);
-    // 后墙小指示(背对门时也能看到当前楼层/方向)
-    const [bc] = makeCanvas(360, 34);
-    const btex = canvasTexture(bc);
-    const backMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 0.17), new THREE.MeshBasicMaterial({ map: btex }));
-    backMesh.position.set(0, 2.34, 4.34);
-    backMesh.rotation.y = Math.PI;
-    this.backIndicatorMat = backMesh.material as THREE.MeshBasicMaterial;
-    this.backIndicatorMat.map = btex;
-    this.scene.add(backMesh);
+    // 楼层按钮面板上方的 7 段电梯状态指示
+    const [sc] = makeCanvas(460, 44);
+    const stex = canvasTexture(sc);
+    const segMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.32, 0.126), new THREE.MeshBasicMaterial({ map: stex }));
+    segMesh.position.set(1.86, 2.39, 2.35); // 紧贴楼层按钮上方
+    segMesh.rotation.y = -Math.PI / 2; // 与墙面平行
+    this.panelSegMat = segMesh.material as THREE.MeshBasicMaterial;
+    this.panelSegMat.map = stex;
+    this.scene.add(segMesh);
   }
 
   private buildPoster() {
     // 医院楼层分布贴画:挂在楼层按钮面板旁边(右侧墙,面板后方)
     const floors = this.engine.diff.floors;
     // 高度 = 标题区 + 楼层行 + 底部提示区(预留 1~2 行,避免与最后一行重叠)
-    const [c, ctx] = makeCanvas(300, floors * 20 + 104);
+    const [c, ctx] = makeCanvas(520, floors * 34 + 170);
     ctx.fillStyle = '#f2ede0';
     ctx.fillRect(0, 0, c.width, c.height);
     ctx.strokeStyle = '#8b6f47';
-    ctx.lineWidth = 5;
-    ctx.strokeRect(2.5, 2.5, c.width - 5, c.height - 5);
+    ctx.lineWidth = 8;
+    ctx.strokeRect(4, 4, c.width - 8, c.height - 8);
     ctx.fillStyle = '#3d3a33';
-    ctx.font = FONT_CN(24);
+    ctx.font = FONT_CN(40);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillText('医院楼层分布', c.width / 2, 12);
+    ctx.fillText('医院楼层分布', c.width / 2, 20);
     ctx.fillStyle = '#8b6f47';
-    ctx.font = FONT_CN(14);
-    ctx.fillText('— 点击查看详情 —', c.width / 2, 44);
-    // 楼层-科室列表(单行排版:1F 急诊大厅 门诊药房 门诊挂号)
+    ctx.font = FONT_CN(22);
+    ctx.fillText('— 点击放大查看 —', c.width / 2, 76);
+    // 楼层-科室列表(单行排版)
     ctx.fillStyle = '#5c5a52';
-    ctx.font = FONT_CN(15);
-    let y = 70;
+    ctx.font = FONT_CN(26);
+    let y = 124;
     for (let i = 1; i <= floors; i++) {
       const depts = FLOOR_DEPTS_OF(i);
       ctx.textAlign = 'left';
-      ctx.fillText(`${i}F ${depts.join(' ')}`, 14, y);
-      y += 20;
+      ctx.fillText(`${i}F ${depts.join(' ')}`, 24, y);
+      y += 34;
     }
     ctx.fillStyle = '#b33a2e';
     ctx.textAlign = 'center';
-    ctx.font = FONT_CN(16);
-    ctx.fillText('👆 点我查看', c.width / 2, c.height - 26);
+    ctx.font = FONT_CN(24);
+    ctx.fillText('👆 点我查看', c.width / 2, c.height - 42);
 
     const mat = new THREE.MeshLambertMaterial({ map: canvasTexture(c) });
     // 按钮面板后方(z≈3.8),与按钮同墙面向轿厢(避免穿入后墙)
@@ -584,44 +595,62 @@ export class Scene3D {
     mesh.userData = { type: 'map' as HitType };
     this.interactives.push(mesh);
     this.scene.add(mesh);
+    // hover 蓝色描边(与楼层按钮一致)
+    const [hc, hctx] = makeCanvas(240, 180);
+    hctx.clearRect(0, 0, 240, 180);
+    hctx.strokeStyle = '#4dd0e1';
+    hctx.lineWidth = 8;
+    hctx.strokeRect(4, 4, 232, 172);
+    const posterOutline = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.0, (c.height / c.width) * 1.0),
+      new THREE.MeshBasicMaterial({ map: canvasTexture(hc), transparent: true, depthWrite: false }),
+    );
+    posterOutline.position.set(1.86, 1.5, 3.8);
+    posterOutline.rotation.y = -Math.PI / 2;
+    posterOutline.visible = false;
+    this.posterOutline = posterOutline;
+    this.scene.add(posterOutline);
   }
 
-  /** 调度笔记本(手持道具,与手机并排位于视野右下角) */
+  /** 调度夹板(手持道具,与手机并排位于视野右下角;点击翻看需求) */
   private buildNotebook() {
     const g = new THREE.Group();
-    // 封面
-    const cover = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.8, 0.05), new THREE.MeshLambertMaterial({ color: '#7a5230' }));
-    cover.position.set(0, 0, 0.03);
-    g.add(cover);
-    // 纸页
-    const [pc, pctx] = makeCanvas(240, 320);
+    // 底板(木质夹板)
+    const board = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.42, 0.025), new THREE.MeshLambertMaterial({ color: '#7a5230' }));
+    g.add(board);
+    // 便签纸
+    const [pc, pctx] = makeCanvas(200, 260);
     pctx.fillStyle = '#f7f2e4';
-    pctx.fillRect(0, 0, 240, 320);
+    pctx.fillRect(0, 0, 200, 260);
     pctx.strokeStyle = '#b9b09a';
     pctx.lineWidth = 2;
-    pctx.strokeRect(1, 1, 238, 318);
+    pctx.strokeRect(1, 1, 198, 258);
     pctx.fillStyle = '#7a5230';
-    pctx.font = FONT_CN(20);
+    pctx.font = FONT_CN(18);
     pctx.textAlign = 'center';
-    pctx.fillText('📓 调度记录', 120, 30);
+    pctx.fillText('📋 调度记录', 100, 22);
     pctx.strokeStyle = '#d8d0ba';
     pctx.lineWidth = 2;
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 7; i++) {
       pctx.beginPath();
-      pctx.moveTo(18, 52 + i * 26);
-      pctx.lineTo(222, 52 + i * 26);
+      pctx.moveTo(16, 44 + i * 24);
+      pctx.lineTo(184, 44 + i * 24);
       pctx.stroke();
     }
     pctx.fillStyle = '#8b6f47';
-    pctx.font = FONT_CN(14);
-    pctx.fillText('— 点击翻看需求 —', 120, 288);
-    const pages = new THREE.Mesh(new THREE.PlaneGeometry(0.56, 0.74), new THREE.MeshLambertMaterial({ map: canvasTexture(pc) }));
-    pages.position.set(0, 0.01, 0.065);
-    g.add(pages);
+    pctx.font = FONT_CN(13);
+    pctx.fillText('— 点击翻看需求 —', 100, 236);
+    const paper = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.36), new THREE.MeshLambertMaterial({ map: canvasTexture(pc) }));
+    paper.position.set(0, -0.01, 0.016);
+    g.add(paper);
+    // 顶部金属夹
+    const clip = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.05, 0.03), new THREE.MeshLambertMaterial({ color: '#9aa5b1' }));
+    clip.position.set(0, 0.185, 0.016);
+    g.add(clip);
 
-    // 手持:位于手机左侧(避免遮挡手机接听/挂断按钮),略小、微侧
-    g.scale.setScalar(0.7);
-    g.position.set(0.05, -0.52, -1.1);
+    // 手持:位于手机左侧(避免遮挡手机接听/挂断按钮),与手机差不多大、微侧
+    g.scale.setScalar(0.95);
+    g.position.set(0.15, -0.45, -1.1);
     g.rotation.y = -0.18;
     g.userData = { type: 'notebook' as HitType };
     this.notebookGroup = g;
@@ -631,17 +660,17 @@ export class Scene3D {
 
   /** 家属走到面板按按钮时的头顶气泡 */
   private buildWalkBubble() {
-    const [c, ctx] = makeCanvas(220, 52);
+    const [c, ctx] = makeCanvas(320, 76);
     ctx.fillStyle = 'rgba(30, 51, 70, 0.92)';
-    ctx.fillRect(0, 0, 220, 52);
+    ctx.fillRect(0, 0, 320, 76);
     ctx.strokeStyle = '#4dd0e1';
-    ctx.lineWidth = 4;
-    ctx.strokeRect(2, 2, 216, 48);
+    ctx.lineWidth = 5;
+    ctx.strokeRect(2.5, 2.5, 315, 71);
     ctx.fillStyle = '#fff';
-    ctx.font = FONT_CN(20);
+    ctx.font = FONT_CN(26);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('按楼层按钮…', 110, 27);
+    ctx.fillText('按楼层按钮…', 160, 39);
     const tex = canvasTexture(c);
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
     sprite.scale.set(0.55, 0.13, 1);
@@ -651,14 +680,18 @@ export class Scene3D {
     this.scene.add(sprite);
   }
 
-  /** 将道具设为独立绘制层:关闭深度测试,始终绘制在电梯之上,避免穿模 */
+  /** 将道具设为最上层绘制:关闭深度读写 + 高渲染序,角色/墙壁永远盖不住手机与笔记本 */
   private setNoDepth(obj: THREE.Object3D) {
     obj.traverse((o) => {
+      o.renderOrder = 10; // 新版 three:renderOrder 在 Object3D 上
       const m = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
       if (!m) return;
       const mats = Array.isArray(m) ? m : [m];
       for (const mm of mats) {
-        if (mm) mm.depthTest = false;
+        if (mm) {
+          mm.depthTest = false;
+          mm.depthWrite = false;
+        }
       }
     });
   }
@@ -672,10 +705,10 @@ export class Scene3D {
     ctx.fillStyle = 'rgba(30, 51, 70, 0.92)';
     ctx.fillRect(0, 0, w, h);
     ctx.strokeStyle = '#4dd0e1';
-    ctx.lineWidth = 4;
-    ctx.strokeRect(2, 2, w - 4, h - 4);
+    ctx.lineWidth = 5;
+    ctx.strokeRect(2.5, 2.5, w - 5, h - 5);
     ctx.fillStyle = '#fff';
-    ctx.font = FONT_CN(20);
+    ctx.font = FONT_CN(26);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, w / 2, h / 2);
@@ -707,18 +740,22 @@ export class Scene3D {
     this.warnSprite = warn;
     this.scene.add(warn);
     // 「别堵门!」按钮(家属堵门时浮现在门口家属身上,点击取消堵门)
-    const [bc, bctx] = makeCanvas(240, 72);
+    // 高分辨率纹理 + 线性过滤,避免小尺寸下 Nearest 下采样导致文字变形;关闭深度测试避免被门框裁剪
+    const [bc, bctx] = makeCanvas(400, 120);
     bctx.fillStyle = '#c92a2a';
-    bctx.fillRect(0, 0, 240, 72);
+    bctx.fillRect(0, 0, 400, 120);
     bctx.strokeStyle = '#fff';
-    bctx.lineWidth = 5;
-    bctx.strokeRect(2.5, 2.5, 235, 67);
+    bctx.lineWidth = 7;
+    bctx.strokeRect(3.5, 3.5, 393, 113);
     bctx.fillStyle = '#fff';
-    bctx.font = FONT_CN(26);
+    bctx.font = FONT_CN(44);
     bctx.textAlign = 'center';
     bctx.textBaseline = 'middle';
-    bctx.fillText('🚫 别堵门!', 120, 37);
-    const block = new THREE.Sprite(new THREE.SpriteMaterial({ map: canvasTexture(bc), transparent: true, depthWrite: false }));
+    bctx.fillText('别堵门!', 200, 61);
+    const blockTex = canvasTexture(bc);
+    blockTex.magFilter = THREE.LinearFilter;
+    blockTex.minFilter = THREE.LinearFilter;
+    const block = new THREE.Sprite(new THREE.SpriteMaterial({ map: blockTex, transparent: true, depthWrite: false, depthTest: false }));
     block.scale.set(0.85, 0.255, 1);
     block.visible = false;
     block.userData = { type: 'block' as HitType };
@@ -729,25 +766,25 @@ export class Scene3D {
 
   private buildPhone() {
     const g = new THREE.Group();
-    // 机身
-    const frame = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.68, 0.035), new THREE.MeshLambertMaterial({ color: '#232838' }));
+    // 机身(比原版更小更扁,便于下移不挡视野)
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.5, 0.03), new THREE.MeshLambertMaterial({ color: '#232838' }));
     g.add(frame);
     // 屏幕(内容简化:接听/挂断在按钮上)
-    const [sc, sctx] = makeCanvas(140, 190);
+    const [sc, sctx] = makeCanvas(120, 150);
     sctx.fillStyle = '#0e1320';
-    sctx.fillRect(0, 0, 140, 190);
+    sctx.fillRect(0, 0, 120, 150);
     sctx.fillStyle = '#4dd0e1';
-    sctx.font = FONT_CN(14);
+    sctx.font = FONT_CN(13);
     sctx.textAlign = 'center';
     sctx.textBaseline = 'top';
-    sctx.fillText('📱 调度热线', 70, 10);
-    sctx.font = '54px sans-serif';
-    sctx.fillText('📞', 70, 62);
+    sctx.fillText('📱 调度热线', 60, 8);
+    sctx.font = '44px sans-serif';
+    sctx.fillText('📞', 60, 48);
     sctx.fillStyle = '#9aa5b1';
-    sctx.font = FONT_CN(12);
-    sctx.fillText('来电按「接听」', 70, 142);
-    const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.46), new THREE.MeshLambertMaterial({ map: canvasTexture(sc) }));
-    screen.position.set(0, 0.1, 0.021);
+    sctx.font = FONT_CN(11);
+    sctx.fillText('来电按「接听」', 60, 112);
+    const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.34), new THREE.MeshLambertMaterial({ map: canvasTexture(sc) }));
+    screen.position.set(0, 0.07, 0.018);
     g.add(screen);
     // 接听按钮(模型上,可直接点击)
     const [ac, actx] = makeCanvas(80, 44);
@@ -761,8 +798,8 @@ export class Scene3D {
     actx.textAlign = 'center';
     actx.textBaseline = 'middle';
     actx.fillText('接听', 40, 22);
-    const answerBtn = new THREE.Mesh(new THREE.PlaneGeometry(0.185, 0.102), new THREE.MeshLambertMaterial({ map: canvasTexture(ac) }));
-    answerBtn.position.set(-0.09, -0.245, 0.022);
+    const answerBtn = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 0.085), new THREE.MeshLambertMaterial({ map: canvasTexture(ac) }));
+    answerBtn.position.set(-0.075, -0.185, 0.019);
     answerBtn.userData = { type: 'answer' as HitType };
     this.answerMat = answerBtn.material as THREE.MeshLambertMaterial;
     g.add(answerBtn);
@@ -779,25 +816,53 @@ export class Scene3D {
     hctx.textAlign = 'center';
     hctx.textBaseline = 'middle';
     hctx.fillText('挂断', 40, 22);
-    const hangupBtn = new THREE.Mesh(new THREE.PlaneGeometry(0.185, 0.102), new THREE.MeshLambertMaterial({ map: canvasTexture(hc) }));
-    hangupBtn.position.set(0.09, -0.245, 0.022);
+    const hangupBtn = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 0.085), new THREE.MeshLambertMaterial({ map: canvasTexture(hc) }));
+    hangupBtn.position.set(0.075, -0.185, 0.019);
     hangupBtn.userData = { type: 'hangup' as HitType };
     this.hangupMat = hangupBtn.material as THREE.MeshLambertMaterial;
     g.add(hangupBtn);
     this.interactives.push(hangupBtn);
 
-    g.position.set(0.56, -0.4, -1.0);
+    g.position.set(0.62, -0.45, -1.0);
     g.rotation.y = -0.12;
     this.phoneGroup = g;
     this.camera.add(g);
   }
 
+  /**
+   * 指令按钮组(手持道具,紧贴视野左下角,无背景框)。
+   * 两个按钮:「往里走走」往深处重排、「靠右站站」靠右重排,共用冷却(冷却时按钮变灰显示秒数)。
+   */
+  private buildRemindDevice() {
+    const g = new THREE.Group();
+    // 「往里走走」按钮
+    this.remindBtnTex = canvasTexture(makeCanvas(220, 64)[0]);
+    const btn1 = new THREE.Mesh(new THREE.PlaneGeometry(0.38, 0.11), new THREE.MeshBasicMaterial({ map: this.remindBtnTex }));
+    btn1.position.set(0, 0.06, 0);
+    btn1.userData = { type: 'remind' as HitType };
+    g.add(btn1);
+    this.interactives.push(btn1);
+    // 「靠右站站」按钮
+    this.rightBtnTex = canvasTexture(makeCanvas(220, 64)[0]);
+    const btn2 = new THREE.Mesh(new THREE.PlaneGeometry(0.38, 0.11), new THREE.MeshBasicMaterial({ map: this.rightBtnTex }));
+    btn2.position.set(0, -0.06, 0);
+    btn2.userData = { type: 'right' as HitType };
+    g.add(btn2);
+    this.interactives.push(btn2);
+
+    // 紧贴左下角
+    g.position.set(-0.72, -0.58, -1.0);
+    g.rotation.y = 0.2;
+    this.remindGroup = g;
+    this.camera.add(g);
+  }
+
   /** 通话字幕窗(手机模型上方,打字机 + 音效) */
   private buildCallBillboard() {
-    const [c] = makeCanvas(340, 110);
+    const [c] = makeCanvas(520, 170);
     const tex = canvasTexture(c);
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.98, 0.32), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
-    mesh.position.set(0.56, 0.02, -1.18);
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.33), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+    mesh.position.set(0.62, -0.02, -1.18);
     mesh.rotation.y = -0.12;
     mesh.visible = false;
     this.callTex = tex;
@@ -905,6 +970,12 @@ export class Scene3D {
         case 'block':
           this.cbs.onPressRemind(); // 「别堵门!」:取消堵门
           return;
+        case 'remind':
+          this.cbs.onPressRemind();
+          return;
+        case 'right':
+          this.cbs.onPressRight();
+          return;
         case 'ask':
           this.askPassenger(ud.taskId!);
           return;
@@ -914,18 +985,33 @@ export class Scene3D {
 
   private setHover(obj: THREE.Object3D | null) {
     if (this.hovered === obj) return;
-    if (this.hovered) {
-      this.hovered.scale.set(1, 1, 1);
+    // 恢复上一个 hover 目标的缩放
+    if (this.hoverScale) {
+      this.hoverScale.obj.scale.copy(this.hoverScale.orig);
+      this.hoverScale = null;
     }
     this.hovered = obj;
     if (obj) {
-      obj.scale.set(1.05, 1.05, 1.05);
+      // 贴画不放大(只显示描边);夹板放大整个组;其余交互对象放大本体
+      if (obj.userData.type !== 'map') {
+        let target: THREE.Object3D = obj;
+        for (let o: THREE.Object3D | null = obj; o; o = o.parent) {
+          if (this.notebookGroup && o === this.notebookGroup) {
+            target = this.notebookGroup;
+            break;
+          }
+        }
+        this.hoverScale = { obj: target, orig: target.scale.clone() };
+        target.scale.multiplyScalar(1.05);
+      }
     }
     // 楼层按钮 hover 蓝色边框
     const hoverFloor = (obj as THREE.Mesh | null)?.userData?.floor as number | undefined;
     for (let i = 0; i < this.hoverOutlines.length; i++) {
       this.hoverOutlines[i].visible = hoverFloor === i + 1;
     }
+    // 贴画 hover 蓝色描边
+    this.posterOutline.visible = (obj as THREE.Mesh | null)?.userData?.type === 'map';
   }
 
   private clearHover() {
@@ -943,10 +1029,16 @@ export class Scene3D {
     // 窄屏适配:屏幕宽度不足时,手机/笔记本/字幕窗向中心靠拢
     const dispW = this.canvas.getBoundingClientRect().width;
     this.narrow = Math.max(0, Math.min(1, (640 - dispW) / 640));
-    this.phoneGroup.position.x = 0.56 - this.narrow * 0.32;
-    this.phoneGroup.position.y = -0.4 + this.narrow * 0.12;
-    this.notebookGroup.position.x = 0.05 - this.narrow * 0.4;
-    this.notebookGroup.position.y = -0.52 + this.narrow * 0.12;
+    this.phoneGroup.position.x = 0.62 - this.narrow * 0.32;
+    this.phoneGroup.position.y = -0.45 + this.narrow * 0.12;
+    if (this.notebookGroup) {
+      // 拟真难度不提供笔记本(见构造函数),此处不能直接访问
+      this.notebookGroup.position.x = 0.05 - this.narrow * 0.4;
+      this.notebookGroup.position.y = -0.45 + this.narrow * 0.12;
+    }
+    this.remindGroup.position.x = -0.72 + this.narrow * 0.4;
+    this.remindGroup.position.y = -0.58 + this.narrow * 0.14;
+    this.updateRemindDevice();
 
     // 三层门同向滑动(厅门 + 轿厢门,关闭时完全覆盖门洞)
     const dx = 0.575 + 1.15 * open;
@@ -1009,6 +1101,17 @@ export class Scene3D {
     this.renderer.render(this.scene, this.camera);
   }
 
+  /** 指令面板按钮纹理:就绪/冷却状态或剩余秒数变化时重绘 */
+  private updateRemindDevice() {
+    const ready = this.engine.remindReady;
+    const cd = this.engine.remindCooldownSec;
+    if (ready === this.lastRemindReady && cd === this.lastRemindCd) return;
+    this.lastRemindReady = ready;
+    this.lastRemindCd = cd;
+    drawBtnTex(this.remindBtnTex, ready, cd, '📢 往里走走', '#4dd0e1');
+    drawBtnTex(this.rightBtnTex, ready, cd, '➡ 靠右站站', '#ffd34d');
+  }
+
   /** 通话字幕窗:从接听时刻起按打字机进度重绘文字,播放打字音效 */
   private updateCallBillboard(frameDt: number) {
     const t = this.currentCall;
@@ -1017,7 +1120,7 @@ export class Scene3D {
       return;
     }
     this.callBillboard.visible = true;
-    this.callBillboard.position.set(0.56 - this.narrow * 0.32, 0.02 + this.narrow * 0.12, -1.18);
+    this.callBillboard.position.set(0.42 - this.narrow * 0.32, -0.02 + this.narrow * 0.12, -1.18);
     const ctx = this.callTex.image.getContext('2d')!;
     const w = this.callTex.image.width;
     const h = this.callTex.image.height;
@@ -1029,35 +1132,35 @@ export class Scene3D {
     ctx.strokeRect(1.5, 1.5, w - 3, h - 3);
     // 标题行
     ctx.fillStyle = '#4dd0e1';
-    ctx.font = FONT_CN(15);
+    ctx.font = FONT_CN(20);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     const route = t.flavor === 'prank' ? `目标:${t.fromFloor}F` : `${t.fromFloor}F → ${t.targetFloor}F`;
-    ctx.fillText(`📞 ${t.title} · ${route}`, 10, 8);
+    ctx.fillText(`📞 ${t.title} · ${route}`, 12, 10);
     // 正文(打字机:从接听时刻开始)
     const elapsedMs = (Date.now() / 1000 - t.answeredAt) * 1000;
     const reveal = Math.min(t.text.length, Math.max(0, Math.floor(elapsedMs / 20)));
     const typing = reveal < t.text.length;
     ctx.fillStyle = '#e8ecf4';
-    ctx.font = FONT_CN(16);
-    const maxW = w - 20;
+    ctx.font = FONT_CN(22);
+    const maxW = w - 24;
     let line = '';
-    let y = 34;
+    let y = 50;
     for (const ch of t.text.slice(0, reveal)) {
       const test = line + ch;
       if (ctx.measureText(test).width > maxW && line) {
-        ctx.fillText(line, 10, y);
-        y += 20;
+        ctx.fillText(line, 12, y);
+        y += 28;
         line = ch;
       } else {
         line = test;
       }
     }
-    ctx.fillText(line, 10, y);
+    ctx.fillText(line, 12, y);
     if (typing) {
-      const curX = 10 + ctx.measureText(line).width;
+      const curX = 12 + ctx.measureText(line).width;
       ctx.fillStyle = '#4dd0e1';
-      ctx.fillRect(curX, y, 4, 16);
+      ctx.fillRect(curX, y, 5, 22);
       // 打字音效(伴随打字模拟语音)
       this.tickT -= frameDt;
       if (this.tickT <= 0) {
@@ -1079,57 +1182,39 @@ export class Scene3D {
     // 方向箭头 + 当前楼层数码管 + 运行状态文字(场景内可见提示)
     const dirText = this.lastDir > 0 ? '上行' : this.lastDir < 0 ? '下行' : '待命';
     const dirColor = this.lastDir > 0 ? '#3fae5a' : this.lastDir < 0 ? '#f08a3c' : '#9aa5b1';
-    if (this.lastDir > 0) arrow(ctx, 10, 12, 17, true, dirColor);
-    else if (this.lastDir < 0) arrow(ctx, 10, 12, 17, false, dirColor);
+    if (this.lastDir > 0) arrow(ctx, 12, 16, 22, true, dirColor);
+    else if (this.lastDir < 0) arrow(ctx, 12, 16, 22, false, dirColor);
     else {
       ctx.fillStyle = dirColor;
-      ctx.fillRect(12, 16, 13, 5);
-      ctx.fillRect(16, 12, 5, 13);
+      ctx.fillRect(16, 22, 16, 6);
+      ctx.fillRect(21, 17, 6, 16);
     }
-    draw7seg(ctx, 38, 3, String(this.lastFloor), 2.6, '#ffd34d');
+    draw7seg(ctx, 52, 3, String(this.lastFloor), 3.6, '#ffd34d');
     ctx.fillStyle = dirColor;
-    ctx.font = FONT_CN(19);
+    ctx.font = FONT_CN(26);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(dirText, 104, 21);
+    ctx.fillText(dirText, 148, 29);
     tex.needsUpdate = true;
-    // 按钮面板上方运行状态(普通电梯样式:"1F ▲")
-    const ptex = this.panelDirMat.map as THREE.CanvasTexture;
-    const pctx2 = ptex.image.getContext('2d')!;
-    const pw = ptex.image.width;
-    const ph = ptex.image.height;
-    pctx2.clearRect(0, 0, pw, ph);
-    pctx2.fillStyle = 'rgba(14, 19, 30, 0.9)';
-    pctx2.fillRect(0, 0, pw, ph);
-    // 楼层
-    pctx2.fillStyle = '#ffd34d';
-    pctx2.font = FONT_PX(24);
-    pctx2.textAlign = 'right';
-    pctx2.textBaseline = 'middle';
-    pctx2.fillText(`${this.lastFloor}F`, pw / 2 - 4, ph / 2);
-    // 上下方向箭头
-    const arrowText = this.lastDir > 0 ? '▲' : this.lastDir < 0 ? '▼' : '—';
-    pctx2.fillStyle = dirColor;
-    pctx2.font = FONT_CN(24);
-    pctx2.textAlign = 'left';
-    pctx2.fillText(arrowText, pw / 2 + 6, ph / 2);
-    ptex.needsUpdate = true;
-    // 后墙小指示
-    const btex = this.backIndicatorMat.map as THREE.CanvasTexture;
-    const bctx = btex.image.getContext('2d')!;
-    const bw = btex.image.width;
-    const bh = btex.image.height;
-    bctx.clearRect(0, 0, bw, bh);
-    bctx.fillStyle = 'rgba(14, 19, 30, 0.85)';
-    bctx.fillRect(0, 0, bw, bh);
-    draw7seg(bctx, 12, 3, String(this.lastFloor), 1.9, '#ffd34d');
-    const bdirText = this.lastDir > 0 ? '上行 ▲' : this.lastDir < 0 ? '下行 ▼' : '待命';
-    bctx.fillStyle = dirColor;
-    bctx.font = FONT_CN(18);
-    bctx.textAlign = 'left';
-    bctx.textBaseline = 'middle';
-    bctx.fillText(bdirText, 86, 17);
-    btex.needsUpdate = true;
+    // 按钮面板上方的 7 段电梯状态指示(当前楼层 + 上下行)
+    const stex = this.panelSegMat.map as THREE.CanvasTexture;
+    const sctx = stex.image.getContext('2d')!;
+    const sw = stex.image.width;
+    const sh = stex.image.height;
+    sctx.clearRect(0, 0, sw, sh);
+    sctx.fillStyle = 'rgba(14, 19, 30, 0.9)';
+    sctx.fillRect(0, 0, sw, sh);
+    sctx.strokeStyle = 'rgba(77, 208, 225, 0.4)';
+    sctx.lineWidth = 2;
+    sctx.strokeRect(1, 1, sw - 2, sh - 2);
+    draw7seg(sctx, 14, 3, String(this.lastFloor), 2.6, '#ffd34d');
+    const segDir = this.lastDir > 0 ? '▲ 上行' : this.lastDir < 0 ? '▼ 下行' : '— 待命';
+    sctx.fillStyle = dirColor;
+    sctx.font = FONT_CN(20);
+    sctx.textAlign = 'left';
+    sctx.textBaseline = 'middle';
+    sctx.fillText(segDir, 118, 23);
+    stex.needsUpdate = true;
   }
 
   private updatePassengers(frameDt: number) {
@@ -1169,8 +1254,10 @@ export class Scene3D {
       if (this.hallWalkTimer <= 0) {
         this.hallWalkTimer = 6 + Math.random() * 6;
         if (ev.doorOpen > 0.3) {
+          // 只有站立角色(家属/站立患者)会自己按电梯;轮椅与卧床患者绝不操作
           const waitingHere = tasks.filter(
-            (t) => t.status === 'pending' && t.fromFloor === floor && t.flavor !== 'prank',
+            (t) =>
+              t.status === 'pending' && t.fromFloor === floor && t.flavor !== 'prank' && t.kind === 'stand',
           );
           if (waitingHere.length > 0) {
             const t = waitingHere[0];
@@ -1206,6 +1293,7 @@ export class Scene3D {
     const aboard = tasks.filter((t) => t.status === 'aboard');
     const placements = this.engine.getPlacements();
     // 新上梯站立角色(家属):多数先去按电梯按钮,再回自己位置;少数忘记直接站
+    // (角色固有性格由引擎在上车时确定,问话回复见 askPassenger)
     for (const t of aboard) {
       if (!this.seenAboard.has(t.id) && t.kind === 'stand' && !this.pressFirstAnim) {
         if (Math.random() < 0.65) {
@@ -1269,9 +1357,48 @@ export class Scene3D {
       }
     }
 
-    // 回收消失的模型
+    // 病人离开:先位移到电梯外,再移除模型
+    for (const t of tasks) {
+      if (t.status === 'delivered' && this.models.has(t.id) && !this.exiting.has(t.id)) {
+        const m = this.models.get(t.id)!;
+        const cm = this.companionModels.get(t.id) ?? null;
+        this.exiting.set(t.id, {
+          start: now,
+          fromMain: m.position.clone(),
+          fromComp: cm ? cm.position.clone() : null,
+        });
+      }
+    }
+    for (const [id, ex] of this.exiting) {
+      const m = this.models.get(id);
+      if (!m) {
+        this.exiting.delete(id);
+        continue;
+      }
+      const p = Math.min(1, (now - ex.start) / 1.1);
+      const ease = p * p * (3 - 2 * p);
+      const out = new THREE.Vector3(0, 0, -0.8); // 门外
+      m.position.lerpVectors(ex.fromMain, out, ease);
+      const cm = this.companionModels.get(id);
+      if (cm && ex.fromComp) {
+        cm.position.lerpVectors(ex.fromComp, out, ease);
+        if (p >= 1) {
+          this.companionModels.delete(id);
+          this.scene.remove(cm);
+          disposeGroup(cm);
+        }
+      }
+      if (p >= 1) {
+        this.exiting.delete(id);
+        this.models.delete(id);
+        this.scene.remove(m);
+        disposeGroup(m);
+      }
+    }
+
+    // 回收消失的模型(离梯动画中的除外)
     for (const [id, m] of this.models) {
-      if (!alive.has(id)) {
+      if (!alive.has(id) && !this.exiting.has(id)) {
         this.models.delete(id);
         this.scene.remove(m);
         disposeGroup(m);
@@ -1359,20 +1486,46 @@ export class Scene3D {
     }
 
     // 家属堵门:角色站在电梯门口(特殊位置,不在电梯内),头顶出现「别堵门!」按钮
+    // 进场:从走廊(门洞外)走进门洞;离场:走到右侧(拟真发难位,发难则留在那里骂人)
     const famBlock = this.engine.familyActive;
     const smile = this.engine.smileActive;
-    this.angryGuy.visible = famBlock || smile;
-    if (famBlock) {
+    if (famBlock && !this.wasFamBlock) {
+      this.angryGuy.visible = true;
+      this.angryGuy.position.set(0, 0, -1.1);
+      this.angryGuy.rotation.y = 0;
+      this.blockAnim = { phase: 'enter', t: 0 };
+    } else if (!famBlock && this.wasFamBlock && this.angryGuy.visible && !this.blockAnim) {
+      this.blockAnim = { phase: 'exit', t: 0 };
+    }
+    this.wasFamBlock = famBlock;
+    if (this.blockAnim) {
+      const a = this.blockAnim;
+      a.t += frameDt;
+      const dur = a.phase === 'enter' ? 1.0 : 0.9;
+      const p = Math.min(1, a.t / dur);
+      const ease = p * p * (3 - 2 * p);
+      const from = a.phase === 'enter' ? new THREE.Vector3(0, 0, -1.1) : new THREE.Vector3(0, 0, 0.35);
+      const to = a.phase === 'enter' ? new THREE.Vector3(0, 0, 0.35) : new THREE.Vector3(1.15, 0, 0.95);
+      this.angryGuy.position.lerpVectors(from, to, ease);
+      if (p >= 1) {
+        if (a.phase === 'exit') {
+          // 走到右侧:拟真模式家属还在骂人则留在那里,否则退场
+          this.angryGuy.rotation.y = Math.PI;
+          if (!smile) this.angryGuy.visible = false;
+        }
+        this.blockAnim = null;
+      }
+    } else if (famBlock) {
       this.angryGuy.position.set(0, 0, 0.35); // 门口(门洞内,堵住进出)
       this.angryGuy.rotation.y = 0;
-      this.blockBtn.visible = true;
+    } else if (smile) {
+      this.angryGuy.position.set(1.15, 0, 0.95);
+      this.angryGuy.rotation.y = Math.PI;
+    }
+    this.angryGuy.visible = this.angryGuy.visible && (famBlock || smile || this.blockAnim !== null);
+    this.blockBtn.visible = famBlock && !this.blockAnim;
+    if (this.blockBtn.visible) {
       this.blockBtn.position.set(0, 2.0, 0.35);
-    } else {
-      this.blockBtn.visible = false;
-      if (smile) {
-        this.angryGuy.position.set(1.15, 0, 0.95);
-        this.angryGuy.rotation.y = Math.PI;
-      }
     }
     this.warnSprite.visible = smile;
     if (smile) {
@@ -1395,16 +1548,32 @@ export class Scene3D {
     if (!t || t.status !== 'aboard') return;
     const m = this.models.get(taskId);
     if (!m) return;
-    let text = '…';
-    if (t.kind === 'stand') {
-      text = `我要去 ${t.targetFloor} 楼!`;
-      sfx.message();
-    } else if (t.kind === 'wheelchair') {
-      text = Math.random() < 0.5 ? `我要去 ${t.targetFloor} 楼!` : '阿巴阿巴阿巴…';
-      sfx.message();
+    // 按角色固有性格回复(上车时确定,再怎么点都一样)
+    const type = t.personality ?? 'teller';
+    let text: string;
+    switch (type) {
+      case 'babbling':
+        text = '阿巴阿巴阿巴…';
+        sfx.message();
+        break;
+      case 'ignore':
+        text = '…'; // 卧床:沉默
+        break;
+      case 'grumpy':
+        text = '烦不烦!';
+        sfx.message();
+        break;
+      case 'mute':
+        text = '别跟我说话…';
+        sfx.message();
+        break;
+      default:
+        text = `我要去 ${t.targetFloor} 楼!`;
+        sfx.message();
     }
-    // 卧床/担架:不会回应(只显示…)
-    this.showBubble(text, m.position.x, m.position.y + 1.9, m.position.z);
+    // 气泡位于角色头部上方(轮椅/床有明显偏移)
+    const headY = t.kind === 'wheelchair' ? 1.5 : t.kind === 'bed' || t.kind === 'stretcher' ? 1.1 : 1.95;
+    this.showBubble(text, m.position.x, m.position.y + headY, m.position.z);
     this.askBubbleUntil = performance.now() + 2400;
   }
 
@@ -1447,4 +1616,23 @@ export class Scene3D {
 
 function shortName(name: string): string {
   return name.length > 6 ? `${name.slice(0, 6)}…` : name;
+}
+
+/** 指令面板按钮纹理:就绪时亮色 + 指令文字,冷却时灰色 + 剩余秒数 */
+function drawBtnTex(tex: THREE.CanvasTexture, ready: boolean, cd: number, label: string, color: string) {
+  const ctx = tex.image.getContext('2d')!;
+  const w = tex.image.width;
+  const h = tex.image.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = ready ? color : '#39404f';
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = ready ? '#10131c' : '#232838';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, w - 4, h - 4);
+  ctx.fillStyle = ready ? '#10131c' : '#9aa5b1';
+  ctx.font = FONT_CN(30);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(ready ? label : `⏳ 冷却 ${cd}s`, w / 2, h / 2 + 2);
+  tex.needsUpdate = true;
 }

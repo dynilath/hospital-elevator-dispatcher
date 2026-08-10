@@ -1,16 +1,20 @@
 import type { Difficulty, PassengerKind } from './types';
 
-// ─── 楼层与科室映射(索引 0 = 1F,最多 8 层,一层可多科室) ─────────
+// ─── 楼层与科室映射(索引 0 = 1F,最多 12 层,科室随楼层数逐渐增加) ─
 // 关键楼层:1F 急诊大厅 / 4F CT影像室 / 5F 手术室 / 6F ICU
 export const FLOOR_DEPTS: string[][] = [
   ['急诊大厅', '门诊药房', '门诊挂号'], // 1F
-  ['检验科', '超声科', '心电图室'], // 2F
-  ['放射科', '门诊诊区 A'], // 3F
-  ['CT 影像室', '核磁共振室'], // 4F
-  ['手术室', '麻醉复苏室'], // 5F
-  ['ICU 重症室', '血透中心'], // 6F
-  ['心内科病房', '心外科病房', '骨科病房'], // 7F
-  ['产科病房', '儿科病房', '肿瘤科病房'], // 8F
+  ['检验科', '超声科'], // 2F
+  ['放射科', '门诊诊区'], // 3F
+  ['CT 影像室'], // 4F
+  ['手术室'], // 5F
+  ['ICU 重症室'], // 6F
+  ['心内科病房', '心外科病房'], // 7F
+  ['骨科病房', '康复科病房'], // 8F
+  ['产科病房', '儿科病房'], // 9F
+  ['神经内科病房', '血液科病房'], // 10F
+  ['消化内科病房', '呼吸科病房'], // 11F
+  ['肿瘤科病房', '内分泌病房'], // 12F
 ];
 
 /** 楼层主科室名(按钮/指示器用) */
@@ -64,8 +68,10 @@ export const DOOR_TIME = 0.65;
 export const DOOR_HOLD = 1.1;
 
 // ─── 拥挤提醒机制 ──────────────────────────────────────────────
-/** 提醒按钮冷却(秒) */
+/** 指令按钮(往里走走/靠右站站)共用冷却(秒) */
 export const REMIND_COOLDOWN = 10;
+/** 指令重排时乘客配合的概率(病床/担架与阿巴阿巴患者永远不配合) */
+export const REPACK_COMPLY = 0.7;
 /** 被拥挤阻塞后乘客放弃等待的时限(秒) */
 export const BLOCK_GIVE_UP = 15;
 
@@ -83,29 +89,13 @@ export const MAX_PENDING_NORMAL = 4;
 /** 消息面板最多显示条数 */
 export const MAX_MESSAGES = 12;
 
-// ─── 评分 ──────────────────────────────────────────────────────
-export const SCORE_NORMAL_BASE = 60;
-export const SCORE_EMERGENCY_BASE = 150;
-export const SCORE_EMERGENCY_BONUS_MAX = 100;
-export const SCORE_EXPIRED_PENALTY = 150;
-/** 领导急召额外加分 */
-export const SCORE_VIP_BONUS = 20;
-/** 被恶作剧电话耍了的惩罚 */
-export const SCORE_PRANK_PENALTY = 10;
+// ─── 满意度 ────────────────────────────────────────────────────
 /** 普通任务等待宽限期(秒,之后开始掉满意度) */
 export const WAIT_GRACE = 20;
 /** 普通任务等待每秒满意度衰减 */
 export const SAT_DECAY_NORMAL = 0.22;
-/** 紧急任务等待每秒满意度衰减 */
-export const SAT_DECAY_EMERGENCY = 1.1;
-/** 拥挤阻塞时每秒满意度衰减 */
-export const SAT_DECAY_BLOCKED = 0.5;
 /** 超时失败固定满意度损失 */
 export const SAT_EXPIRED_PENALTY = 12;
-/** 乘客放弃等待的满意度损失 */
-export const SAT_GIVE_UP_PENALTY = 6;
-/** 家属堵门自动妥协的满意度损失 */
-export const SAT_FAMILY_PENALTY = 6;
 /** 家属堵门持续时长(秒) */
 export const FAMILY_BLOCK_TIME = 6;
 /** 微笑应急时限(秒) */
@@ -123,26 +113,26 @@ export const PRESETS: DifficultyPreset[] = [
   {
     key: 'easy',
     name: '简单',
-    desc: '6 层楼 · 低频紧急 · 一天 5 分钟',
-    diff: { floors: 6, emergencyGap: 78, dayMinutes: 5, simulate: false },
+    desc: '4 层楼 · 低频紧急 · 一天 5 分钟',
+    diff: { floors: 4, emergencyGap: 85, dayMinutes: 5, simulate: false },
   },
   {
     key: 'normal',
     name: '中等',
-    desc: '8 层楼 · 中频紧急 · 一天 8 分钟',
-    diff: { floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false },
+    desc: '6 层楼 · 中频紧急 · 一天 5 分钟',
+    diff: { floors: 6, emergencyGap: 60, dayMinutes: 5, simulate: false },
   },
   {
     key: 'hard',
     name: '困难',
-    desc: '8 层楼 · 高频紧急 · 一天 12 分钟',
-    diff: { floors: 8, emergencyGap: 40, dayMinutes: 12, simulate: false },
+    desc: '8 层楼 · 高频紧急 · 一天 5 分钟',
+    diff: { floors: 8, emergencyGap: 42, dayMinutes: 5, simulate: false },
   },
   {
     key: 'sim',
     name: '拟真',
-    desc: '8 层楼 · 最高难度 · 无消息记录 · 家属可能发难',
-    diff: { floors: 8, emergencyGap: 38, dayMinutes: 15, simulate: true },
+    desc: '困难难度，无笔记本，有恶意家属',
+    diff: { floors: 8, emergencyGap: 38, dayMinutes: 5, simulate: true },
   },
 ];
 
@@ -152,10 +142,10 @@ export const EMERGENCY_GAP_OPTIONS: { label: string; value: number }[] = [
   { label: '高', value: 40 },
 ];
 
-export const MIN_FLOORS = 6;
-export const MAX_FLOORS = 8;
+export const MIN_FLOORS = 4;
+export const MAX_FLOORS = 12;
 export const MIN_DAY_MINUTES = 5;
-export const MAX_DAY_MINUTES = 20;
+export const MAX_DAY_MINUTES = 10;
 
 // ─── 患者姓名(挂号打码风格:郑** / 刘*明) ───────────────────────
 export const SURNAMES = [

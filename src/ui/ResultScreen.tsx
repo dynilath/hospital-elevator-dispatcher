@@ -19,10 +19,6 @@ export default function ResultScreen({ result, onRestart, onExit }: Props) {
 
         <div className="result-grid">
           <div className="r-item">
-            <div className="r-label">总分</div>
-            <div className="r-value px-num">{result.score}</div>
-          </div>
-          <div className="r-item">
             <div className="r-label">满意度</div>
             <div className="r-value px-num">{result.satisfaction}</div>
           </div>

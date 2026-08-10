@@ -17,16 +17,9 @@ import {
   NATURAL_REPACK_USED,
   PASSENGER_SIZE,
   REMIND_COOLDOWN,
-  SAT_DECAY_EMERGENCY,
+  REPACK_COMPLY,
   SAT_DECAY_NORMAL,
   SAT_EXPIRED_PENALTY,
-  SAT_FAMILY_PENALTY,
-  SCORE_EMERGENCY_BASE,
-  SCORE_EMERGENCY_BONUS_MAX,
-  SCORE_EXPIRED_PENALTY,
-  SCORE_NORMAL_BASE,
-  SCORE_PRANK_PENALTY,
-  SCORE_VIP_BONUS,
   SMILE_TIME,
   WAIT_GRACE,
   timeScaleOf,
@@ -49,10 +42,13 @@ export class GameEngine {
   private idSeq = 1;
 
   private daySeconds = DAY_START;
+  /** 开局真实时间戳(倒计时按难度分钟计) */
+  private startReal = Date.now() / 1000;
+  /** 倒计时结束后的加班阶段:不再生成新任务,服务完所有角色才结束 */
+  private overtime = false;
   phase: 'playing' | 'result' = 'playing';
 
   satisfaction = 100;
-  score = 0;
 
   // 统计
   private statTotal = 0;
@@ -226,7 +222,7 @@ export class GameEngine {
     this.notify();
   }
 
-  /** 提醒乘客往里走 / 劝家属让开(重排:人往深处走,腾出门口) */
+  /** 提醒乘客往里走 / 劝家属让开(指令重排:人往深处走,腾出门口) */
   pressRemind() {
     if (this.phase !== 'playing') return;
     // 家属堵门:按提醒按钮劝家属让开,立即送达
@@ -240,7 +236,18 @@ export class GameEngine {
     }
     if (this.remindCooldown > 0) return;
     this.remindCooldown = REMIND_COOLDOWN;
-    this.repack();
+    this.repackByCommand('deep');
+    this.compAnim = 1;
+    sfx.remind();
+    this.notify();
+  }
+
+  /** 指令「靠右站站」:让人尽量站到最右边(与往里走走共用冷却) */
+  pressRight() {
+    if (this.phase !== 'playing') return;
+    if (this.remindCooldown > 0) return;
+    this.remindCooldown = REMIND_COOLDOWN;
+    this.repackByCommand('right');
     this.compAnim = 1;
     sfx.remind();
     this.notify();
@@ -293,18 +300,30 @@ export class GameEngine {
     this.daySeconds += dt * this.timeScale;
     if (this.daySeconds >= DAY_END) {
       this.daySeconds = DAY_END;
-      this.finishDay();
-      return;
+      this.overtime = true; // 进入加班:不再生成新任务
     }
 
-    // 生成任务
+    // 加班阶段:所有角色完成(送达/失败)后才结束
+    if (this.overtime) {
+      const done = this.tasks.every(
+        (t) => t.status === 'delivered' || t.status === 'failed',
+      );
+      if (done) {
+        this.finishDay();
+        return;
+      }
+    }
+
+    // 生成任务(加班阶段停止)
     const pendingNormal = this.tasks.filter(
       (t) => t.type === 'normal' && (t.status === 'pending' || t.status === 'aboard'),
     ).length;
-    const specs = this.spawner.update(dt, this.daySeconds, this.diff.floors, this.diff.emergencyGap, pendingNormal);
+    const specs = this.overtime
+      ? []
+      : this.spawner.update(dt, this.daySeconds, this.diff.floors, this.diff.emergencyGap, pendingNormal);
     for (const spec of specs) this.addTask(spec);
 
-    // 延迟来电送达(工勤拍门等)
+    // 延迟来电送达
     const now = Date.now() / 1000;
     for (const t of this.tasks) {
       if (!t.callSent && now - t.createdAt >= t.callDelay) this.sendCall(t);
@@ -333,12 +352,11 @@ export class GameEngine {
       }
     }
 
-    // 满意度衰减
+    // 满意度衰减(仅普通任务等待超过宽限期;紧急任务不影响满意度)
     let decay = 0;
     for (const t of this.tasks) {
       if (t.status !== 'pending') continue;
-      if (t.type === 'emergency') decay += SAT_DECAY_EMERGENCY * dt;
-      else if (t.wait > WAIT_GRACE) decay += SAT_DECAY_NORMAL * dt;
+      if (t.wait > WAIT_GRACE) decay += SAT_DECAY_NORMAL * dt;
     }
     this.satisfaction = Math.max(0, Math.min(100, this.satisfaction - decay));
 
@@ -354,7 +372,6 @@ export class GameEngine {
         if (this.familyTimer <= 0) {
           this.familyTask = null;
           this.deliver(t);
-          this.satisfaction = Math.max(0, this.satisfaction - SAT_FAMILY_PENALTY);
           this.triggerSmile(); // 拟真:家属当场抱怨
           sfx.fail();
         }
@@ -427,13 +444,19 @@ export class GameEngine {
     for (const t of waiting) {
       const size = PASSENGER_SIZE[t.kind] + (t.companion ? 1 : 0);
       const spot = this.findSpot(t.kind);
-      // 陪护家属还需要一个 1×1 空位
-      const companionSpot = t.companion ? this.findSpot('stand') : null;
+      const g = this.gridOf(t.kind);
+      // 陪护家属还需要一个 1×1 空位:先临时占住患者的格子再找,避免家属站进病床/轮椅里
+      let companionSpot: { col: number; row: number } | null = null;
+      if (t.companion) {
+        if (spot) this.placements.set(t.id, { ...spot, w: g.w, h: g.h });
+        companionSpot = spot ? this.findSpot('stand') : null;
+        if (spot) this.placements.delete(t.id);
+      }
       const capacityOk = t.type === 'emergency' || this.elevator.used + size <= CAPACITY;
       if (capacityOk && spot && (!t.companion || companionSpot)) {
         t.status = 'aboard';
+        t.personality = this.pickPersonality(t.kind);
         this.elevator.used += size;
-        const g = this.gridOf(t.kind);
         this.placements.set(t.id, { ...spot, w: g.w, h: g.h });
         if (t.companion && companionSpot) {
           this.companions.set(t.id, companionSpot);
@@ -457,8 +480,6 @@ export class GameEngine {
       this.statDone++;
       if (!boardedAny) {
         t.text = `${t.text} —— 到层后空无一人,被耍了 😤`;
-        this.score -= SCORE_PRANK_PENALTY;
-        this.satisfaction = Math.max(0, this.satisfaction - 4);
         sfx.fail();
       }
       this.notify();
@@ -515,15 +536,23 @@ export class GameEngine {
     return null;
   }
 
-  /** 重排:人尽可能往深处走,填满电梯(病床保持原位) */
+  /** 上车时确定角色固有性格:决定问话回复与是否服从重排指令 */
+  private pickPersonality(kind: Task['kind']): Task['personality'] {
+    if (kind === 'bed' || kind === 'stretcher') return 'ignore';
+    if (kind === 'wheelchair') return Math.random() < 0.5 ? 'teller' : 'babbling';
+    const r = Math.random();
+    return r < 0.7 ? 'teller' : r < 0.85 ? 'grumpy' : 'mute';
+  }
+
+  /** 自然重排:人尽可能往深处走,填满电梯(病床与阿巴阿巴患者保持原位) */
   private repack() {
     const aboard = this.tasks
       .filter((t) => t.status === 'aboard')
       .sort((a, b) => a.id - b.id);
     const next = new Map<number, { col: number; row: number; w: number; h: number }>();
-    // 1) 病床/担架保持原位
+    // 1) 病床/担架与阿巴阿巴患者保持原位
     for (const t of aboard) {
-      if (t.kind === 'bed' || t.kind === 'stretcher') {
+      if (t.kind === 'bed' || t.kind === 'stretcher' || t.personality === 'babbling') {
         const p = this.placements.get(t.id);
         if (p) next.set(t.id, p);
       }
@@ -569,6 +598,86 @@ export class GameEngine {
     this.companions = compNext;
   }
 
+  /**
+   * 指令重排(「往里走走」/「靠右站站」):不一定对所有人都生效——
+   * 多数乘客配合挪动,少数不听;病床/担架与阿巴阿巴患者永远原地不动。
+   * mode 'deep' 往深处走(腾出门口),'right' 尽量靠右站。
+   */
+  private repackByCommand(mode: 'deep' | 'right') {
+    const aboard = this.tasks
+      .filter((t) => t.status === 'aboard')
+      .sort((a, b) => a.id - b.id);
+    const next = new Map<number, { col: number; row: number; w: number; h: number }>();
+    // 1) 固定位:病床/担架、阿巴阿巴患者与不配合的乘客保持原位
+    let refused = 0;
+    for (const t of aboard) {
+      const stays =
+        t.kind === 'bed' ||
+        t.kind === 'stretcher' ||
+        t.personality === 'babbling' ||
+        Math.random() >= REPACK_COMPLY;
+      if (stays) {
+        refused++;
+        const p = this.placements.get(t.id);
+        if (p) next.set(t.id, p);
+      }
+    }
+    this.placements = next;
+    // 配合的乘客按指令挪动:深度优先;靠右模式列序从右到左
+    const cols = (right: boolean): number[] => (right ? [2, 1, 0] : [0, 1, 2]);
+    // 2) 轮椅
+    for (const t of aboard) {
+      if (t.kind !== 'wheelchair' || next.has(t.id)) continue;
+      outer: for (let row = GRID_ROWS - 2; row >= 0; row--) {
+        for (const col of cols(mode === 'right')) {
+          if (this.cellsFree(col, row, 2, 2)) {
+            this.placements.set(t.id, { col, row, w: 2, h: 2 });
+            break outer;
+          }
+        }
+      }
+    }
+    // 3) 站立
+    for (const t of aboard) {
+      if (t.kind !== 'stand' || next.has(t.id)) continue;
+      outer: for (let row = GRID_ROWS - 1; row >= 0; row--) {
+        for (const col of cols(mode === 'right')) {
+          if (this.cellsFree(col, row, 1, 1)) {
+            this.placements.set(t.id, { col, row, w: 1, h: 1 });
+            break outer;
+          }
+        }
+      }
+    }
+    // 4) 家属陪护(同样配合概率;不配合的留在原位)
+    const compNext = new Map<number, { col: number; row: number }>();
+    for (const t of aboard) {
+      if (!t.companion) continue;
+      if (Math.random() >= REPACK_COMPLY) {
+        const old = this.companions.get(t.id);
+        if (old) compNext.set(t.id, old);
+        continue;
+      }
+      outer: for (let row = GRID_ROWS - 1; row >= 0; row--) {
+        for (const col of cols(mode === 'right')) {
+          if (this.cellsFree(col, row, 1, 1)) {
+            compNext.set(t.id, { col, row });
+            break outer;
+          }
+        }
+      }
+    }
+    this.companions = compNext;
+    // 3) 反馈:指令完全没效果时解释原因(病床/担架不动是常态,不提示;阿巴阿巴与拒不听令才提示)
+    if (aboard.length > 0 && refused === aboard.length) {
+      if (aboard.some((t) => t.personality === 'babbling')) {
+        this.pushEvent('🤤 阿巴阿巴的患者没听懂,原地不动');
+      } else if (aboard.some((t) => t.kind !== 'bed' && t.kind !== 'stretcher' && t.personality !== 'babbling')) {
+        this.pushEvent('😤 乘客都不肯听你的指挥');
+      }
+    }
+  }
+
   /** 供 3D 场景读取的网格占位 */
   getPlacements(): ReadonlyMap<number, { col: number; row: number; w: number; h: number }> {
     return this.placements;
@@ -588,15 +697,9 @@ export class GameEngine {
     this.statDone++;
     this.waitSum += t.wait;
     if (t.type === 'emergency') {
-      const remain = Math.max(0, t.deadline - t.wait);
-      const bonus = Math.round((SCORE_EMERGENCY_BONUS_MAX * remain) / t.deadline);
-      this.score += SCORE_EMERGENCY_BASE + bonus;
       this.statEmgSuccess++;
       this.satisfaction = Math.min(100, this.satisfaction + 2);
     } else {
-      let base = SCORE_NORMAL_BASE + Math.max(0, 60 - t.wait) * 0.5;
-      if (t.flavor === 'vip') base += SCORE_VIP_BONUS;
-      this.score += base;
       this.satisfaction = Math.min(100, this.satisfaction + 1);
     }
     sfx.success();
@@ -627,9 +730,17 @@ export class GameEngine {
     this.tasks.push(task);
     this.statTotal++;
     if (spec.type === 'emergency') this.statEmgTotal++;
-    if (spec.callDelay > 0) {
-      // 工勤拍门:先传来拍门声,电话迟迟才到
-      sfx.knock();
+    if (spec.noCall) {
+      // 站立患者/家属不会打电话:自己按电梯(自动登记厅外呼叫 ▲/▼)
+      const dir = spec.targetFloor > spec.fromFloor ? 'up' : 'down';
+      if (!this.elevator.lights.has(spec.fromFloor)) {
+        this.elevator.press(spec.fromFloor);
+      }
+      this.elevator.hallCalls.set(spec.fromFloor, dir);
+      this.familyLights.add(spec.fromFloor);
+      this.notify();
+    } else if (spec.callDelay > 0) {
+      // 工勤来电来得晚(电话迟迟才到)
     } else {
       this.sendCall(task);
     }
@@ -656,7 +767,6 @@ export class GameEngine {
   private failTask(t: Task) {
     t.status = 'failed';
     this.statFailed++;
-    this.score -= SCORE_EXPIRED_PENALTY;
     this.satisfaction = Math.max(0, this.satisfaction - SAT_EXPIRED_PENALTY);
     sfx.fail();
     this.notify();
@@ -686,7 +796,6 @@ export class GameEngine {
       gradeName = '合格调度员';
     }
     return {
-      score: Math.round(this.score),
       satisfaction: Math.round(this.satisfaction),
       grade,
       gradeName,
@@ -701,11 +810,14 @@ export class GameEngine {
     };
   }
 
+  /** 剩余时间倒计时(mm:ss,按难度实际分钟,准确到秒) */
   dayText(): string {
-    const total = Math.floor(this.daySeconds);
-    const h = Math.floor(total / 3600);
-    const m = Math.floor((total % 3600) / 60);
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    if (this.overtime) return '00:00';
+    const elapsed = Date.now() / 1000 - this.startReal;
+    const remain = Math.max(0, Math.round(this.diff.dayMinutes * 60 - elapsed));
+    const m = Math.floor(remain / 60);
+    const sec = remain % 60;
+    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   }
 
   // ─── 快照 ────────────────────────────────────────────────────
@@ -739,8 +851,8 @@ export class GameEngine {
     return {
       phase: this.phase,
       dayText: this.dayText(),
+      overtime: this.overtime,
       satisfaction: Math.round(this.satisfaction),
-      score: Math.round(this.score),
       total: this.statTotal,
       done: this.statDone,
       emgTotal: this.statEmgTotal,
@@ -791,6 +903,11 @@ export class GameEngine {
   /** 提醒按钮冷却结束 */
   get remindReady(): boolean {
     return this.remindCooldown <= 0;
+  }
+
+  /** 指令按钮共用冷却剩余秒数(向上取整,供 3D 按钮显示) */
+  get remindCooldownSec(): number {
+    return Math.ceil(this.remindCooldown);
   }
 
   /** 家属堵门进行中 */

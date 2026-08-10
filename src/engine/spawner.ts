@@ -6,6 +6,7 @@ import {
   SURNAMES,
   GIVEN_CHARS,
   FLOOR_DEPTS_OF,
+  FLOOR_NAME,
   PEAK_FACTOR,
   MAX_PENDING_NORMAL,
   NORMAL_INTERVAL,
@@ -25,6 +26,8 @@ export interface TaskSpec {
   callDelay: number;
   /** 家属陪护(随病人上梯,占 1 格) */
   companion?: boolean;
+  /** 不打来电话(站立患者自己按电梯) */
+  noCall?: boolean;
 }
 
 const rnd = (a: number, b: number): number => a + Math.random() * (b - a);
@@ -90,9 +93,9 @@ export class Spawner {
         type: 'normal',
         title: '匿名来电',
         text: pick([
-          `(压低声音)喂?听说 ${target}F 有人要下楼,你赶紧去!`,
-          `有人在 ${target}F 拍门半天了,快去接!`,
-          `${target}F 那层有人等着转科,别磨蹭!`,
+          `(压低声音)喂?听说 ${deptOf(target)} 有人要下楼,你赶紧去!`,
+          `有人在 ${deptOf(target)} 等了半天,快去接!`,
+          `${deptOf(target)} 有人等着转科,别磨蹭!`,
         ]),
         fromFloor: target,
         targetFloor: target,
@@ -103,16 +106,16 @@ export class Spawner {
       };
     }
 
-    // 剧情电话:工勤拍门(电话来得晚,态度差)
+    // 剧情电话:工勤来电(电话来得晚,态度差)
     if (roll < 0.3) {
       const f = pick(Array.from({ length: floors }, (_, i) => i + 1).filter((x) => x > 1));
       return {
         type: 'normal',
         title: deptOf(f),
         text: pick([
-          `门都快拍烂了!病人等半天了!马上到 ${f}F 接!`,
-          `(骂骂咧咧)拍门拍半天没人理!${f}F,人还来不来?!`,
-          `再不来病人自己走下去算了!${f}F!快!`,
+          `病人等半天了!马上到 ${deptOf(f)} 接!`,
+          `(骂骂咧咧)半天没人理!${deptOf(f)},人还来不来?!`,
+          `再不来病人自己走下去算了!${deptOf(f)}!快!`,
         ]),
         fromFloor: f,
         targetFloor: 1,
@@ -129,7 +132,7 @@ export class Spawner {
       return {
         type: 'normal',
         title: pick(['院办', '医务科', '护理部']),
-        text: `我是${pick(['张', '刘', '陈'])}${pick(['院长', '主任', '科长'])}!立刻到 1F 接我,送到 ${tgt}F,耽误不起!`,
+        text: `我是${pick(['张', '刘', '陈'])}${pick(['院长', '主任', '科长'])}!立刻到急诊大厅接我,送到 ${FLOOR_NAME(tgt)},耽误不起!`,
         fromFloor: 1,
         targetFloor: tgt,
         kind: pickKind([['stand', 8], ['wheelchair', 2]]),
@@ -145,7 +148,7 @@ export class Spawner {
       () => ({
         type: 'normal',
         title: '急诊大厅',
-        text: `${name} 需做 CT 检查,请接送到 5F CT 影像室`,
+        text: `${name} 需做 CT 检查,请接送到 CT 影像室`,
         fromFloor: 1,
         targetFloor: CT_FLOOR,
         kind: pickKind([['bed', 4], ['wheelchair', 3], ['stand', 3]]),
@@ -156,7 +159,7 @@ export class Spawner {
       () => ({
         type: 'normal',
         title: '急诊大厅',
-        text: `${name} 需拍 X 光片,请送至 4F 门诊诊区旁放射科`,
+        text: `${name} 需拍 X 光片,请送至放射科`,
         fromFloor: 1,
         targetFloor: 4,
         kind: pickKind([['wheelchair', 4], ['stand', 4], ['bed', 2]]),
@@ -167,7 +170,7 @@ export class Spawner {
       () => ({
         type: 'normal',
         title: '急诊大厅',
-        text: `${name} 需抽血化验,请送至 2F 检验科`,
+        text: `${name} 需抽血化验,请送至检验科`,
         fromFloor: 1,
         targetFloor: 2,
         kind: 'stand',
@@ -178,7 +181,7 @@ export class Spawner {
       () => ({
         type: 'normal',
         title: '门诊诊区 A',
-        text: `${name} 就诊完毕,请送至 1F 急诊留观`,
+        text: `${name} 就诊完毕,请送至急诊留观`,
         fromFloor: 3,
         targetFloor: 1,
         kind: pickKind([['wheelchair', 4], ['stand', 6]]),
@@ -189,7 +192,7 @@ export class Spawner {
       () => ({
         type: 'normal',
         title: 'CT 影像室',
-        text: `${name} 已拍完 CT,请接回 1F 急诊留观`,
+        text: `${name} 已拍完 CT,请接回急诊留观`,
         fromFloor: CT_FLOOR,
         targetFloor: 1,
         kind: pickKind([['bed', 5], ['wheelchair', 4], ['stand', 1]]),
@@ -200,7 +203,7 @@ export class Spawner {
       () => ({
         type: 'normal',
         title: '放射科',
-        text: `${name} 拍片完毕,请接回 1F 急诊大厅`,
+        text: `${name} 拍片完毕,请接回急诊大厅`,
         fromFloor: 4,
         targetFloor: 1,
         kind: pickKind([['wheelchair', 5], ['stand', 3], ['bed', 2]]),
@@ -211,7 +214,7 @@ export class Spawner {
       () => ({
         type: 'normal',
         title: '检验科',
-        text: `${name} 化验完成,请接回 1F 急诊留观`,
+        text: `${name} 化验完成,请接回急诊留观`,
         fromFloor: 2,
         targetFloor: 1,
         kind: 'stand',
@@ -227,7 +230,7 @@ export class Spawner {
         () => ({
           type: 'normal',
           title: deptOf(ward),
-          text: `${name} 需去 1F 门诊药房取药,请到 ${ward}F 接人送至 1F`,
+          text: `${name} 需去门诊药房取药,请到 ${deptOf(ward)} 接人`,
           fromFloor: ward,
           targetFloor: 1,
           kind: pickKind([['wheelchair', 4], ['stand', 6]]),
@@ -238,7 +241,7 @@ export class Spawner {
         () => ({
           type: 'normal',
           title: deptOf(ward),
-          text: `卧床患者 ${name} 需做 CT 复查,请到 ${ward}F 接人送至 5F`,
+          text: `卧床患者 ${name} 需做 CT 复查,请到 ${deptOf(ward)} 接人送至 CT 影像室`,
           fromFloor: ward,
           targetFloor: CT_FLOOR,
           kind: 'bed',
@@ -249,7 +252,7 @@ export class Spawner {
         () => ({
           type: 'normal',
           title: deptOf(ward),
-          text: `${name} 需拍片检查,请到 ${ward}F 接人送至 4F 放射科`,
+          text: `${name} 需拍片检查,请到 ${deptOf(ward)} 接人送至放射科`,
           fromFloor: ward,
           targetFloor: 4,
           kind: pickKind([['wheelchair', 5], ['stand', 4], ['bed', 1]]),
@@ -260,7 +263,7 @@ export class Spawner {
         () => ({
           type: 'normal',
           title: 'CT 影像室',
-          text: `${name} 已拍完片,请送至 ${ward}F ${deptOf(ward)}`,
+          text: `${name} 已拍完片,请送至 ${deptOf(ward)}`,
           fromFloor: CT_FLOOR,
           targetFloor: ward,
           kind: pickKind([['bed', 5], ['wheelchair', 4], ['stand', 1]]),
@@ -271,7 +274,7 @@ export class Spawner {
         () => ({
           type: 'normal',
           title: '放射科',
-          text: `${name} 检查完毕,请送回 ${ward}F ${deptOf(ward)}`,
+          text: `${name} 检查完毕,请送回 ${deptOf(ward)}`,
           fromFloor: 4,
           targetFloor: ward,
           kind: pickKind([['wheelchair', 5], ['stand', 4], ['bed', 1]]),
@@ -286,18 +289,36 @@ export class Spawner {
       spec.companion = true;
       spec.text += ' (家属陪同)';
     }
+    // 能走路的患者/家属默认不打来电话:他们自己按电梯(厅外呼叫)
+    if (spec.kind === 'stand' && !spec.flavor) {
+      spec.noCall = true;
+    }
     return spec;
   }
 
   /** 生成一个紧急任务(楼层不足时跳过对应模板;ICU 转运带家属堵门剧情) */
   makeEmergency(floors: number): TaskSpec | null {
+    const hasOR = floors >= OR_FLOOR;
     const hasICU = floors >= ICU_FLOOR;
+    if (!hasOR) {
+      // 小楼(4 层):无手术室,顶层设为抢救区
+      return {
+        type: 'emergency',
+        title: '急诊大厅',
+        text: `急诊!危重患者需立即抢救,速送 ${FLOOR_NAME(floors)}!`,
+        fromFloor: 1,
+        targetFloor: floors,
+        kind: 'stretcher',
+        deadline: 75,
+        callDelay: 0,
+      };
+    }
     const templates: (() => TaskSpec | null)[] = [
       // 急诊 → 手术室(最常见,无家属)
       () => ({
         type: 'emergency',
         title: '急诊大厅',
-        text: '急诊!危重患者需立即手术,急救床已就位 1F,速送 6F 手术室!',
+        text: `急诊!危重患者需立即手术,急救床已就位,速送手术室!`,
         fromFloor: 1,
         targetFloor: OR_FLOOR,
         kind: 'stretcher',
@@ -311,7 +332,7 @@ export class Spawner {
         () => ({
           type: 'emergency',
           title: 'ICU 重症室',
-          text: 'ICU 病人病情恶化!速到 7F 接人送 6F 手术室抢救!',
+          text: `ICU 病人病情恶化!速到 ICU 接人送手术室抢救!`,
           fromFloor: ICU_FLOOR,
           targetFloor: OR_FLOOR,
           kind: 'stretcher',
@@ -322,7 +343,7 @@ export class Spawner {
         () => ({
           type: 'emergency',
           title: '手术室',
-          text: '手术完毕!患者需立即转 7F ICU 监护!家属非要跟车,帮劝一劝!',
+          text: `手术完毕!患者需立即转 ICU 监护!家属非要跟车,帮劝一劝!`,
           fromFloor: OR_FLOOR,
           targetFloor: ICU_FLOOR,
           kind: 'stretcher',
@@ -334,7 +355,7 @@ export class Spawner {
         () => ({
           type: 'emergency',
           title: '急诊大厅',
-          text: '危重患者已上急救床!速送 7F ICU!家属死活要跟着,来了就知道!',
+          text: `危重患者已上急救床!速送 ICU!家属死活要跟着,来了就知道!`,
           fromFloor: 1,
           targetFloor: ICU_FLOOR,
           kind: 'stretcher',

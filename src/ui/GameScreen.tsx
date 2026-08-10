@@ -3,7 +3,7 @@ import { GameEngine } from '../engine/Engine';
 import { Scene3D } from '../render3d/Scene3D';
 import type { Difficulty, Snapshot, TaskView } from '../types';
 import NotebookOverlay from './NotebookOverlay';
-import MapOverlay from './MapOverlay';
+import PosterOverlay from './PosterOverlay';
 import ResultScreen from './ResultScreen';
 
 /** 调试信息:各楼层排队 / 3×4 格子占用 / 电梯内需求 */
@@ -95,10 +95,8 @@ export default function GameScreen({ difficulty, onExit, onRestart }: Props) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [notebookOpen, setNotebookOpen] = useState(false);
   const [mapOpen, setMapOpen] = useState(false);
-  const [callToast, setCallToast] = useState(false);
   const [eventToast, setEventToast] = useState<string | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
-  const lastCallRef = useRef(0);
   const lastEventRef = useRef(0);
 
   useEffect(() => {
@@ -109,6 +107,7 @@ export default function GameScreen({ difficulty, onExit, onRestart }: Props) {
     const scene = new Scene3D(canvas, engine, {
       onPressFloor: (f) => engineRef.current?.pressFloor(f),
       onPressRemind: () => engineRef.current?.pressRemind(),
+      onPressRight: () => engineRef.current?.pressRight(),
       onAnswer: () => answerCall(),
       onHangup: () => hangup(),
       onOpenMap: () => setMapOpen(true),
@@ -131,17 +130,6 @@ export default function GameScreen({ difficulty, onExit, onRestart }: Props) {
   }, [difficulty]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const emgPending = snap !== null && snap.emgTotal > 0 && snap.emgSuccess < snap.emgTotal;
-
-  // 来电提示
-  useEffect(() => {
-    if (!snap) return;
-    if (snap.latestCallId > lastCallRef.current) {
-      lastCallRef.current = snap.latestCallId;
-      setCallToast(true);
-      const timer = setTimeout(() => setCallToast(false), 2600);
-      return () => clearTimeout(timer);
-    }
-  }, [snap?.latestCallId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 家属事件消息(斥责/告知楼层等)
   useEffect(() => {
@@ -178,8 +166,10 @@ export default function GameScreen({ difficulty, onExit, onRestart }: Props) {
     <div className="game3d">
       <header className="hud">
         <div className="hud-item">
-          <span className="hud-label">⏰</span>
-          <span className="hud-value px-num">{snap ? snap.dayText : '--:--'}</span>
+          <span className="hud-label">{snap?.overtime ? '⏱' : '⏰'}</span>
+          <span className={`hud-value px-num ${snap?.overtime ? 'emg-warn' : ''}`}>
+            {snap ? (snap.overtime ? '加班中' : `剩 ${snap.dayText}`) : '--:--'}
+          </span>
         </div>
         <div className="hud-item hud-sat">
           <span className="hud-label">😊 满意度</span>
@@ -187,10 +177,6 @@ export default function GameScreen({ difficulty, onExit, onRestart }: Props) {
             <div className="sat-fill" style={{ width: `${snap ? snap.satisfaction : 0}%` }} />
           </div>
           <span className="hud-value px-num">{snap ? snap.satisfaction : 0}</span>
-        </div>
-        <div className="hud-item">
-          <span className="hud-label">⭐</span>
-          <span className="hud-value px-num">{snap ? snap.score : 0}</span>
         </div>
         <div className="hud-item">
           <span className="hud-label">📋</span>
@@ -227,23 +213,7 @@ export default function GameScreen({ difficulty, onExit, onRestart }: Props) {
 
         {snap?.error && <div className="err-banner">⚠ 引擎异常:{snap.error}</div>}
 
-        {callToast && <div className="call-toast">📞 新来电…</div>}
-
         {eventToast && <div className="event-toast">{eventToast}</div>}
-
-        <div className="stage-hint">🖱 拖拽环视 · 手机接听/挂断 · 笔记本 · 贴画 · 按钮面板</div>
-      </div>
-
-      {/* 屏幕下方:「往里面走走」重排按钮(始终在游戏画面内,无滚动条) */}
-      <div className="remind-bar">
-        <button
-          className="remind-ui"
-          disabled={!!snap && !snap.reminder.ready}
-          onClick={() => engineRef.current?.pressRemind()}
-        >
-          📢 往里面走走
-          {snap && !snap.reminder.ready && <span className="px-num remind-cd"> {snap.reminder.cooldown}s</span>}
-        </button>
       </div>
 
       {/* 调试信息面板 */}
@@ -263,7 +233,7 @@ export default function GameScreen({ difficulty, onExit, onRestart }: Props) {
         <NotebookOverlay snap={snap} onClose={() => setNotebookOpen(false)} />
       )}
       {snap && mapOpen && !notebookOpen && (
-        <MapOverlay engine={engineRef.current} onClose={() => setMapOpen(false)} />
+        <PosterOverlay floors={engineRef.current?.diff.floors ?? 8} onClose={() => setMapOpen(false)} />
       )}
 
       {snap?.smile.active && (

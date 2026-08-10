@@ -44,7 +44,7 @@ function check(name: string, cond: boolean, extra = '') {
 
 // ── 4. 家属堵门:到站自动妥协 + 拟真触发微笑 ────────────────────
 {
-  const eng = new GameEngine({ floors: 15, emergencyGap: 38, dayMinutes: 15, simulate: true });
+  const eng = new GameEngine({ floors: 15, emergencyGap: 38, dayMinutes: 5, simulate: true });
   const e = eng as unknown as {
     tasks: unknown[];
     processDoors(): void;
@@ -75,7 +75,7 @@ function check(name: string, cond: boolean, extra = '') {
 
 // ── 5. 家属堵门:按提醒按钮立即劝离,不触发微笑 ──────────────────
 {
-  const eng = new GameEngine({ floors: 15, emergencyGap: 38, dayMinutes: 15, simulate: true });
+  const eng = new GameEngine({ floors: 15, emergencyGap: 38, dayMinutes: 5, simulate: true });
   const e = eng as unknown as {
     tasks: unknown[];
     processDoors(): void;
@@ -118,7 +118,7 @@ function check(name: string, cond: boolean, extra = '') {
   e.processDoors();
   const task = e.tasks[0] as { status: string; text: string };
   check('恶作剧被识破', task.status === 'delivered' && task.text.includes('被耍了'));
-  check('恶作剧扣分', eng.getSnapshot().score === -10, `score=${eng.getSnapshot().score}`);
+  check('恶作剧不扣满意度', eng.getSnapshot().satisfaction === 100, `sat=${eng.getSnapshot().satisfaction}`);
 }
 
 // ── 7. 工勤拍门:呼叫延迟送达 ──────────────────────────────────
@@ -138,7 +138,7 @@ function check(name: string, cond: boolean, extra = '') {
 
 // ── 8. 拟真消息不留痕(引擎不删除,由 UI 隐藏) ──────────────────
 {
-  const eng = new GameEngine({ floors: 15, emergencyGap: 38, dayMinutes: 15, simulate: true });
+  const eng = new GameEngine({ floors: 15, emergencyGap: 38, dayMinutes: 5, simulate: true });
   check('simulate 标记正确', eng.getSnapshot().simulate === true);
   const normal = new GameEngine({ floors: 6, emergencyGap: 78, dayMinutes: 5, simulate: false });
   check('非拟真标记正确', normal.getSnapshot().simulate === false);
@@ -314,7 +314,7 @@ function check(name: string, cond: boolean, extra = '') {
     }
   }
   check('上行先到 5F,反向呼叫反转后服务', visited[0] === 5 && visited[1] === 6, visited.join('->'));
-  check('厅外呼叫应答后清除', ev.hallCalls.size === 0);
+  check('厅外呼叫应答后清除', ev.hallCalls.get(6) === undefined);
   // 玩家取消厅外呼叫 → 家属随机反应
   ev.posY = 4;
   ev.floor = 4;
@@ -323,6 +323,189 @@ function check(name: string, cond: boolean, extra = '') {
   eng.pressFloor(3);
   const after = eng.getSnapshot();
   check('取消厅外呼叫触发反应', after.satisfaction === before - 3 || after.eventMsg !== null || ev.lights.has(3));
+}
+
+// ── 15. 倒计时结束进入加班:不再生成新任务,所有角色完成才结束 ────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as { tasks: unknown[]; daySeconds: number; update(dt: number): void };
+  e.daySeconds = 17 * 3600 - 1;
+  const before = e.tasks.length;
+  e.update(0.05);
+  check('倒计时结束进入加班', eng.getSnapshot().overtime === true);
+  e.update(5);
+  check('加班阶段不再生成新任务', e.tasks.length === before, `before=${before} after=${e.tasks.length}`);
+  for (const t of e.tasks) (t as { status: string }).status = 'delivered';
+  e.update(0.05);
+  check('所有角色完成才结束', eng.getSnapshot().phase === 'result');
+}
+
+// ── 16. 站立患者不打来电话,自己按电梯(厅外呼叫,内部按钮也亮) ──
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as { addTask(spec: unknown): void; tasks: unknown[] };
+  const spec = {
+    type: 'normal', title: '检验科', text: 'x', fromFloor: 2, targetFloor: 1,
+    kind: 'stand', deadline: 0, callDelay: 0, noCall: true,
+  };
+  e.addTask(spec);
+  const task = e.tasks[0] as { callSent: boolean };
+  check('站立患者不打电话', task.callSent === false);
+  check('自动登记厅外呼叫(下行)', eng.elevator.hallCalls.get(2) === 'down');
+  check('内部按钮同步亮起', eng.elevator.lights.has(2));
+}
+
+// ── 17. 指令重排(往里走走):病床与阿巴阿巴患者永远不动 ────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as {
+    tasks: unknown[];
+    placements: Map<number, { col: number; row: number; w: number; h: number }>;
+    repackByCommand(mode: 'deep' | 'right'): void;
+  };
+  const mk = (id: number, kind: string, personality: string) => ({
+    id, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 2, kind,
+    status: 'aboard', createdAt: 0, deadline: 0, wait: 0, callDelay: 0, callSent: true, callSentAt: 0,
+    answered: false, answeredAt: 0, personality,
+  });
+  // 病床(2×4)占左列全部行;阿巴阿巴站(2,0);正常站立(2,1)
+  const bed = mk(1, 'bed', 'ignore');
+  const babbling = mk(2, 'stand', 'babbling');
+  const teller = mk(3, 'stand', 'teller');
+  e.tasks.push(bed, babbling, teller);
+  e.placements.set(1, { col: 0, row: 0, w: 2, h: 4 });
+  e.placements.set(2, { col: 2, row: 0, w: 1, h: 1 });
+  e.placements.set(3, { col: 2, row: 1, w: 1, h: 1 });
+  const rnd = Math.random;
+  Math.random = () => 0; // 全员配合(低于 REPACK_COMPLY 0.7)
+  e.repackByCommand('deep');
+  const p = e.placements.get(3);
+  check('往里走走:病床原地不动', e.placements.get(1)!.col === 0 && e.placements.get(1)!.row === 0);
+  check('往里走走:阿巴阿巴患者原地不动', e.placements.get(2)!.col === 2 && e.placements.get(2)!.row === 0);
+  check('往里走走:正常乘客往深处走', p?.col === 2 && p?.row === 2, `pos=${p?.col},${p?.row}`);
+  Math.random = rnd;
+}
+
+// ── 18. 靠右站站:靠右优先 + 两按钮共用冷却 ───────────────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as {
+    tasks: unknown[];
+    placements: Map<number, { col: number; row: number; w: number; h: number }>;
+    repackByCommand(mode: 'deep' | 'right'): void;
+  };
+  e.tasks.push({
+    id: 10, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 2, kind: 'stand',
+    status: 'aboard', createdAt: 0, deadline: 0, wait: 0, callDelay: 0, callSent: true, callSentAt: 0,
+    answered: false, answeredAt: 0, personality: 'teller',
+  });
+  e.placements.set(10, { col: 0, row: 0, w: 1, h: 1 });
+  const rnd = Math.random;
+  Math.random = () => 0; // 配合
+  e.repackByCommand('right');
+  const p = e.placements.get(10);
+  check('靠右站站:尽量靠右(右列被调度员占则次右)', p?.col === 1 && p?.row === 3, `pos=${p?.col},${p?.row}`);
+  // 冷却共用:按完「往里走走」后立刻按「靠右站站」不应再重排
+  eng.pressRemind();
+  const beforeRow = e.placements.get(10)!.row;
+  eng.pressRight();
+  check('两按钮共用冷却(冷却中按靠右无效)', e.placements.get(10)!.row === beforeRow);
+  Math.random = rnd;
+}
+
+// ── 19. 指令重排:乘客不配合时留在原地并给出提示 ──────────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as {
+    tasks: unknown[];
+    placements: Map<number, { col: number; row: number; w: number; h: number }>;
+    repackByCommand(mode: 'deep' | 'right'): void;
+  };
+  e.tasks.push({
+    id: 20, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 2, kind: 'stand',
+    status: 'aboard', createdAt: 0, deadline: 0, wait: 0, callDelay: 0, callSent: true, callSentAt: 0,
+    answered: false, answeredAt: 0, personality: 'teller',
+  });
+  e.placements.set(20, { col: 0, row: 0, w: 1, h: 1 });
+  const rnd = Math.random;
+  Math.random = () => 0.9; // 不配合(≥ REPACK_COMPLY 0.7)
+  eng.pressRemind();
+  const p = e.placements.get(20);
+  check('乘客不配合 → 原地不动', p?.col === 0 && p?.row === 0, `pos=${p?.col},${p?.row}`);
+  check('全部不听 → 有提示消息', eng.getSnapshot().eventMsg !== null);
+  Math.random = rnd;
+}
+
+// ── 20. 指令重排:不配合的家属陪护留在原位(不消失) ───────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as {
+    tasks: unknown[];
+    placements: Map<number, { col: number; row: number; w: number; h: number }>;
+    companions: Map<number, { col: number; row: number }>;
+    repackByCommand(mode: 'deep' | 'right'): void;
+  };
+  e.tasks.push({
+    id: 30, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 2, kind: 'stand',
+    status: 'aboard', createdAt: 0, deadline: 0, wait: 0, callDelay: 0, callSent: true, callSentAt: 0,
+    answered: false, answeredAt: 0, personality: 'teller', companion: true,
+  });
+  e.placements.set(30, { col: 0, row: 0, w: 1, h: 1 });
+  e.companions.set(30, { col: 1, row: 0 });
+  const rnd = Math.random;
+  Math.random = () => 0.9; // 乘客与家属都不配合
+  e.repackByCommand('deep');
+  const c = e.companions.get(30);
+  check('不配合的陪护家属留在原位', c?.col === 1 && c?.row === 0, `pos=${c?.col},${c?.row}`);
+  const p = e.placements.get(30);
+  check('不配合的乘客也留在原位', p?.col === 0 && p?.row === 0, `pos=${p?.col},${p?.row}`);
+  Math.random = rnd;
+}
+
+// ── 21. 病床带陪护:家属单独占一格,不在病床里 ────────────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as { tasks: unknown[]; processDoors(): void };
+  const now = Date.now() / 1000;
+  e.tasks.push({
+    id: 41, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 2, kind: 'bed',
+    status: 'pending', createdAt: now, deadline: 0, wait: 0, callDelay: 0, callSent: true, callSentAt: now,
+    companion: true,
+  });
+  eng.elevator.doorState = 'open';
+  eng.elevator.doorTimer = 5;
+  eng.elevator.moving = false;
+  e.processDoors();
+  const bedP = eng.getPlacements().get(41);
+  const compP = eng.getCompanionPlacements().get(41);
+  check('病床带陪护上梯', bedP !== undefined && compP !== undefined);
+  const bedCells = new Set<string>();
+  for (let r = bedP!.row; r < bedP!.row + bedP!.h; r++) {
+    for (let c = bedP!.col; c < bedP!.col + bedP!.w; c++) bedCells.add(`${c},${r}`);
+  }
+  check(
+    '家属单独占一格(不在病床内)',
+    compP ? !bedCells.has(`${compP.col},${compP.row}`) : false,
+    `bed=${bedP?.col},${bedP?.row} comp=${compP?.col},${compP?.row}`,
+  );
+}
+
+// ── 22. 电梯内只有病床时按指令:无提示(病床不动是常态) ────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as {
+    tasks: unknown[];
+    placements: Map<number, { col: number; row: number; w: number; h: number }>;
+  };
+  e.tasks.push({
+    id: 50, type: 'normal', title: 'x', text: 'x', fromFloor: 1, targetFloor: 2, kind: 'bed',
+    status: 'aboard', createdAt: 0, deadline: 0, wait: 0, callDelay: 0, callSent: true, callSentAt: 0,
+    answered: false, answeredAt: 0, personality: 'ignore',
+  });
+  e.placements.set(50, { col: 0, row: 0, w: 2, h: 4 });
+  eng.pressRemind();
+  check('只有病床时按指令无提示', eng.getSnapshot().eventMsg === null);
+  check('病床保持原位', e.placements.get(50)!.row === 0 && e.placements.get(50)!.col === 0);
 }
 
 console.log(failed === 0 ? '\n== ALL PASS ==' : `\n== ${failed} FAILED ==`);
