@@ -649,9 +649,10 @@ export class Scene3D {
     g.add(clip);
 
     // 手持:位于手机左侧(避免遮挡手机接听/挂断按钮),与手机差不多大、微侧
-    g.scale.setScalar(0.95);
+    g.scale.setScalar(1.15);
     g.position.set(0.15, -0.45, -1.1);
     g.rotation.y = -0.18;
+    g.rotation.z = 0.18;
     g.userData = { type: 'notebook' as HitType };
     this.notebookGroup = g;
     this.interactives.push(g);
@@ -934,8 +935,21 @@ export class Scene3D {
     const p = this.ndc(e);
     this.raycaster.setFromCamera(p, this.camera);
     const hits = this.raycaster.intersectObjects(this.interactives, true);
-    const hit = hits.find((h) => (h.object.userData.type as HitType) !== undefined);
-    this.setHover(hit ? hit.object : null);
+    let hit: THREE.Object3D | null = null;
+    for (const h of hits) {
+      // 交互标记可能在父级 Group 上(如夹板),需向上查找(与 clickAt 一致)
+      let obj: THREE.Object3D | null = h.object;
+      let ud: { type?: HitType } | null = null;
+      while (obj && !ud?.type) {
+        ud = obj.userData as { type?: HitType };
+        obj = obj.parent;
+      }
+      if (ud?.type) {
+        hit = h.object;
+        break;
+      }
+    }
+    this.setHover(hit);
   }
 
   private clickAt(e: PointerEvent) {
@@ -1033,10 +1047,10 @@ export class Scene3D {
     this.phoneGroup.position.y = -0.45 + this.narrow * 0.12;
     if (this.notebookGroup) {
       // 拟真难度不提供笔记本(见构造函数),此处不能直接访问
-      this.notebookGroup.position.x = 0.05 - this.narrow * 0.4;
-      this.notebookGroup.position.y = -0.45 + this.narrow * 0.12;
+      this.notebookGroup.position.x = 0.35 - this.narrow * 0.4;
+      this.notebookGroup.position.y = -0.55 + this.narrow * 0.12;
     }
-    this.remindGroup.position.x = -0.72 + this.narrow * 0.4;
+    this.remindGroup.position.x = -0.62 + this.narrow * 0.4;
     this.remindGroup.position.y = -0.58 + this.narrow * 0.14;
     this.updateRemindDevice();
 
