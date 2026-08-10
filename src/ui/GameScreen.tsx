@@ -6,6 +6,17 @@ import NotebookOverlay from './NotebookOverlay';
 import PosterOverlay from './PosterOverlay';
 import ResultScreen from './ResultScreen';
 
+/** 满意度算法说明(悬停满意度栏显示) */
+const SAT_TIP = [
+  '😊 满意度算法(满分 100)',
+  '· 领导急召:上电梯前 每秒 −1',
+  '· 普通任务:等待超过 20 秒后 每秒 −0.22',
+  '· 紧急任务超时:−12',
+  '· 取消家属呼叫被斥责:−3(随机)',
+  '· 送达任务:普通 +1 / 紧急 +2',
+  '· 微笑应急成功:+3',
+].join('\n');
+
 /** 调试信息:各楼层排队 / 3×4 格子占用 / 电梯内需求 */
 function DebugBody({ snap, engine }: { snap: Snapshot; engine: GameEngine | null }) {
   const byFloor = new Map<number, number>();
@@ -171,7 +182,7 @@ export default function GameScreen({ difficulty, onExit, onRestart }: Props) {
             {snap ? (snap.overtime ? '加班中' : `剩 ${snap.dayText}`) : '--:--'}
           </span>
         </div>
-        <div className="hud-item hud-sat">
+        <div className="hud-item hud-sat" data-tip={SAT_TIP}>
           <span className="hud-label">😊 满意度</span>
           <div className="sat-bar">
             <div className="sat-fill" style={{ width: `${snap ? snap.satisfaction : 0}%` }} />

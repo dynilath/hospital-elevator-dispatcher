@@ -17,7 +17,19 @@ function check(name: string, cond: boolean, extra = '') {
   for (let i = 0; i < 60; i++) e.update(0.05); // 再 3s → 到期
   const snap = eng.getSnapshot();
   check('微笑超时 → 提前下班', snap.phase === 'result', snap.phase);
-  check('提前下班原因含微博', snap.result?.endReason?.includes('微博') ?? false, snap.result?.endReason ?? '');
+  check('被开除不评级', snap.result?.endedEarly === true && snap.result?.grade === '-', `grade=${snap.result?.grade}`);
+  check('被开除标题', snap.result?.gradeName === '被开除了', snap.result?.gradeName ?? '');
+  check('被开除原因提示', snap.result?.endReason?.includes('被开除了') ?? false, snap.result?.endReason ?? '');
+}
+
+// ── 1.5 提前按「收工」:不计算评级,标记提前下班 ─────────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  eng.endDay();
+  const r = eng.getSnapshot().result;
+  check('提前收工标记 endedEarly', r?.endedEarly === true, JSON.stringify(r));
+  check('提前收工不计算评级', r?.grade === '-' && r?.gradeName === '提前下班', `grade=${r?.grade} name=${r?.gradeName}`);
+  check('提前收工提示文案', r?.endReason === '提前收工:你怎么能提前下班呢', r?.endReason ?? '');
 }
 
 // ── 2. 微笑应急:及时点击微笑 → 解除且继续 ───────────────────────
@@ -119,6 +131,34 @@ function check(name: string, cond: boolean, extra = '') {
   const task = e.tasks[0] as { status: string; text: string };
   check('恶作剧被识破', task.status === 'delivered' && task.text.includes('被耍了'));
   check('恶作剧不扣满意度', eng.getSnapshot().satisfaction === 100, `sat=${eng.getSnapshot().satisfaction}`);
+}
+
+// ── 6.5 领导急召:上梯前每秒 −1 满意度;上梯后不再衰减 ────────────
+{
+  const eng = new GameEngine({ floors: 10, emergencyGap: 55, dayMinutes: 5, simulate: false });
+  const e = eng as unknown as {
+    tasks: unknown[];
+    overtime: boolean;
+    update(dt: number): void;
+    processDoors(): void;
+  };
+  e.overtime = true; // 停掉任务生成,保证衰减确定性
+  const now = Date.now() / 1000;
+  e.tasks.push({
+    id: 5001, type: 'normal', title: '院办', text: '领导急召', fromFloor: 1, targetFloor: 8,
+    kind: 'stand', status: 'pending', createdAt: now, deadline: 0, wait: 0,
+    flavor: 'vip', callDelay: 0, callSent: true, callSentAt: now,
+  });
+  e.update(3); // 等待 3 秒
+  check('领导急召上梯前每秒 −1', eng.getSnapshot().satisfaction === 97, `sat=${eng.getSnapshot().satisfaction}`);
+  // 上梯后再等 3 秒 → 不再衰减
+  eng.elevator.doorState = 'open';
+  eng.elevator.doorTimer = 5;
+  eng.elevator.moving = false;
+  e.processDoors();
+  check('领导已上梯', (e.tasks[0] as { status: string }).status === 'aboard');
+  e.update(3);
+  check('上梯后不再衰减', eng.getSnapshot().satisfaction === 97, `sat=${eng.getSnapshot().satisfaction}`);
 }
 
 // ── 7. 工勤拍门:呼叫延迟送达 ──────────────────────────────────
@@ -246,24 +286,29 @@ function check(name: string, cond: boolean, extra = '') {
 // ── 11. 方向调度:下行中按上行需求,先清空下行再翻转 ─────────────
 {
   const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as { update(dt: number): void };
   const ev = eng.elevator;
   ev.posY = 5;
   ev.floor = 5;
   ev.press(3); // 下行需求
   ev.press(6); // 上行需求(应延后)
+  // 运行期间游戏会持续生成任务,站立患者/家属会自己按电梯按钮(真实行为),
+  // 电梯顺路服务这些灯——因此只统计本测试登记的 3F/6F 停靠
   const visited: number[] = [];
   let lastOpen = -1;
   for (let i = 0; i < 3000 && visited.length < 2; i++) {
-    (eng as unknown as { update(dt: number): void }).update(0.05);
+    e.update(0.05);
     if (ev.doorState === 'open' && ev.floor !== lastOpen) {
       lastOpen = ev.floor;
-      visited.push(ev.floor);
+      if (ev.floor === 3 || ev.floor === 6) visited.push(ev.floor);
     }
   }
   check('下行优先:先到 3F 再到 6F', visited[0] === 3 && visited[1] === 6, visited.join('->'));
-  // 再推进让门关闭、方向复位
-  for (let i = 0; i < 60; i++) (eng as unknown as { update(dt: number): void }).update(0.05);
-  check('全部需求清空熄灭', ev.lights.size === 0 && ev.direction === 'idle', `lights=${ev.lights.size} dir=${ev.direction}`);
+  // 本测试登记的需求最终必然被服务(家属新按的灯可能还在服务中,不影响判定)
+  for (let i = 0; i < 600 && (ev.lights.has(3) || ev.lights.has(6)); i++) {
+    e.update(0.05);
+  }
+  check('3F/6F 需求已服务完毕', !ev.lights.has(3) && !ev.lights.has(6), `lights=[${[...ev.lights]}]`);
 }
 
 // ── 12. 再按一次按钮取消需求 ───────────────────────────────────

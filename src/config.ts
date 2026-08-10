@@ -94,6 +94,8 @@ export const MAX_MESSAGES = 12;
 export const WAIT_GRACE = 20;
 /** 普通任务等待每秒满意度衰减 */
 export const SAT_DECAY_NORMAL = 0.22;
+/** 领导急召:上电梯前每秒满意度衰减 */
+export const SAT_DECAY_VIP = 1;
 /** 超时失败固定满意度损失 */
 export const SAT_EXPIRED_PENALTY = 12;
 /** 家属堵门持续时长(秒) */

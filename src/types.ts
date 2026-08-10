@@ -136,7 +136,9 @@ export interface ResultStats {
   emgSuccess: number;
   avgWait: number;
   endTime: string;
-  /** 提前结束原因(如被拍照发微博) */
+  /** 提前结束(提前收工/被开除):不计算评级 */
+  endedEarly: boolean;
+  /** 提前结束原因提示(提前收工 / 被开除) */
   endReason?: string;
 }
 

@@ -13,9 +13,15 @@ export default function ResultScreen({ result, onRestart, onExit }: Props) {
     <div className="result-overlay">
       <div className="result-card">
         <div className="result-sub px-num">下班打卡 {result.endTime}</div>
-        {result.endReason && <div className="end-reason">📸 {result.endReason}</div>}
-        <div className={`grade ${gradeClass[result.grade] ?? ''}`}>{result.grade}</div>
-        <div className="grade-name">{result.gradeName}</div>
+        {result.endReason && <div className="end-reason">{result.endReason}</div>}
+        {result.endedEarly ? (
+          <div className="grade grade-early">{result.gradeName}</div>
+        ) : (
+          <>
+            <div className={`grade ${gradeClass[result.grade] ?? ''}`}>{result.grade}</div>
+            <div className="grade-name">{result.gradeName}</div>
+          </>
+        )}
 
         <div className="result-grid">
           <div className="r-item">

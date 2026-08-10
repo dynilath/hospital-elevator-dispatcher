@@ -19,6 +19,7 @@ import {
   REMIND_COOLDOWN,
   REPACK_COMPLY,
   SAT_DECAY_NORMAL,
+  SAT_DECAY_VIP,
   SAT_EXPIRED_PENALTY,
   SMILE_TIME,
   WAIT_GRACE,
@@ -287,10 +288,10 @@ export class GameEngine {
     return elapsedMs >= t.text.length * 20;
   }
 
-  /** 提前收工 */
+  /** 提前收工(不计算评级,结果页直接显示「提前下班」提示) */
   endDay() {
     if (this.phase !== 'playing') return;
-    this.finishDay();
+    this.finishDay(true, '提前收工:你怎么能提前下班呢');
   }
 
   // ─── 更新 ────────────────────────────────────────────────────
@@ -352,11 +353,12 @@ export class GameEngine {
       }
     }
 
-    // 满意度衰减(仅普通任务等待超过宽限期;紧急任务不影响满意度)
+    // 满意度衰减:领导急召上梯前每秒 −1;普通任务超宽限期后按固定速率
     let decay = 0;
     for (const t of this.tasks) {
       if (t.status !== 'pending') continue;
-      if (t.wait > WAIT_GRACE) decay += SAT_DECAY_NORMAL * dt;
+      if (t.flavor === 'vip') decay += SAT_DECAY_VIP * dt;
+      else if (t.wait > WAIT_GRACE) decay += SAT_DECAY_NORMAL * dt;
     }
     this.satisfaction = Math.max(0, Math.min(100, this.satisfaction - decay));
 
@@ -383,7 +385,7 @@ export class GameEngine {
       this.smileDeadline -= dt;
       if (this.smileDeadline <= 0) {
         this.smileDeadline = 0;
-        this.finishDay('家属把你的黑脸拍下来发到了微博,医院让你提前下班');
+        this.finishDay(true, '被开除了:态度不好被发到网上去了');
         return;
       }
     }
@@ -772,28 +774,35 @@ export class GameEngine {
     this.notify();
   }
 
-  private finishDay(reason?: string) {
+  private finishDay(endedEarly = false, reason?: string) {
     this.phase = 'result';
     sfx.dayEnd();
-    this.result = this.computeResult(reason);
+    this.result = this.computeResult(reason, endedEarly);
     this.notify();
   }
 
-  private computeResult(endReason?: string): ResultStats {
-    const emgRate = this.statEmgTotal > 0 ? this.statEmgSuccess / this.statEmgTotal : 1;
-    const compRate = this.statTotal > 0 ? this.statDone / this.statTotal : 1;
-    const pct = 0.45 * (this.satisfaction / 100) + 0.35 * emgRate + 0.2 * compRate;
+  private computeResult(endReason?: string, endedEarly = false): ResultStats {
     let grade = 'C';
     let gradeName = '需要加油';
-    if (pct >= 0.85) {
-      grade = 'S';
-      gradeName = '金牌调度员';
-    } else if (pct >= 0.7) {
-      grade = 'A';
-      gradeName = '优秀调度员';
-    } else if (pct >= 0.55) {
-      grade = 'B';
-      gradeName = '合格调度员';
+    if (!endedEarly) {
+      // 提前收工不计算评级
+      const emgRate = this.statEmgTotal > 0 ? this.statEmgSuccess / this.statEmgTotal : 1;
+      const compRate = this.statTotal > 0 ? this.statDone / this.statTotal : 1;
+      const pct = 0.45 * (this.satisfaction / 100) + 0.35 * emgRate + 0.2 * compRate;
+      if (pct >= 0.85) {
+        grade = 'S';
+        gradeName = '金牌调度员';
+      } else if (pct >= 0.7) {
+        grade = 'A';
+        gradeName = '优秀调度员';
+      } else if (pct >= 0.55) {
+        grade = 'B';
+        gradeName = '合格调度员';
+      }
+    } else {
+      // 提前收工 / 被开除:不评级,大标题按提示文案区分
+      grade = '-';
+      gradeName = endReason?.startsWith('被开除') ? '被开除了' : '提前下班';
     }
     return {
       satisfaction: Math.round(this.satisfaction),
@@ -806,6 +815,7 @@ export class GameEngine {
       emgSuccess: this.statEmgSuccess,
       avgWait: this.statDone > 0 ? this.waitSum / this.statDone : 0,
       endTime: this.dayText(),
+      endedEarly,
       endReason,
     };
   }

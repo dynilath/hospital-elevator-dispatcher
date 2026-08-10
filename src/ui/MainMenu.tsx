@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import pkg from '../../package.json';
 import {
   EMERGENCY_GAP_OPTIONS,
   MAX_DAY_MINUTES,
@@ -31,6 +32,7 @@ export default function MainMenu({ onStart }: Props) {
         <div className="menu-title">
           <div className="title-main">🏥 医院电梯调度员</div>
           <div className="title-sub px-num">HOSPITAL ELEVATOR DISPATCHER</div>
+          <div className="title-ver px-num">v{pkg.version}</div>
         </div>
 
         <div className="preset-row">
@@ -117,7 +119,7 @@ export default function MainMenu({ onStart }: Props) {
             <li>🛏️ 卧床患者、♿ 轮椅乘客上下梯较慢;拥挤时用左下角<b>「📢 往里走走」/「➡ 靠右站站」</b>让人挪位——乘客不一定会听,病床与「阿巴阿巴」的患者永远不动。</li>
             <li>点击乘客可以<b>问目的地</b>;有的家属会堵门,点他头顶的<b>「🚫 别堵门!」</b>劝走。</li>
             <li>按钮旁的<b>「医院楼层分布」贴画</b>可点开查看各层科室。</li>
-            <li>🎭 <b>拟真难度</b>:来电不留记录需自行记忆;遇到家属抱怨要限时「微笑」,否则被拍下发微博提前下班。</li>
+            <li>🎭 <b>拟真难度</b>:来电不留记录需自行记忆;遇到家属抱怨要限时「微笑」,否则态度被发到网上,当场被开除。</li>
           </ul>
         </details>
       </div>

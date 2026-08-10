@@ -82,6 +82,14 @@ body {
   color: var(--ink-dim);
 }
 
+.title-ver {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--ink-dim);
+  letter-spacing: 2px;
+  opacity: 0.75;
+}
+
 .preset-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -260,6 +268,33 @@ body {
 .hud-sat {
   flex: 1;
   min-width: 200px;
+  position: relative;
+  cursor: help;
+}
+
+/* 满意度算法提示框(悬停显示) */
+.hud-sat::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  z-index: 60;
+  width: 300px;
+  background: var(--bg2);
+  border: 2px solid var(--panel-border);
+  box-shadow: 4px 4px 0 var(--shadow);
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--ink);
+  white-space: pre-line;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.hud-sat:hover::after {
+  opacity: 1;
 }
 
 .sat-bar {
@@ -669,6 +704,11 @@ body {
 
 .grade-c {
   color: var(--red);
+}
+
+.grade-early {
+  color: var(--ink-dim);
+  font-size: 44px;
 }
 
 .grade-name {

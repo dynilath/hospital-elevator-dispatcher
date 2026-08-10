@@ -136,9 +136,11 @@ export class Scene3D {
   private warnSprite!: THREE.Sprite;
   private scoldT = 0;
   private lastFrame = 0;
-  /** 堵门家属进场/离场动画(进场从走廊走进门洞,离场走到右侧微笑位) */
-  private blockAnim: { phase: 'enter' | 'exit'; t: number } | null = null;
+  /** 堵门家属进场/离场动画(进场从走廊走进门洞,离场朝门外走或走到右侧骂人位) */
+  private blockAnim: { phase: 'enter' | 'exit'; t: number; exitMode?: 'side' | 'out' } | null = null;
   private wasFamBlock = false;
+  /** 家属被赶走后站在门外,等电梯离开楼层再清理(避免关门就消失的时序问题) */
+  private hallWait: { floor: number } | null = null;
 
   private disposed = false;
 
@@ -171,6 +173,10 @@ export class Scene3D {
       // 拟真难度:不提供笔记本(无显示、无点击位)
       this.buildNotebook();
       this.setNoDepth(this.notebookGroup);
+      // 夹板渲染序低一档,排在手机/指令按钮等道具后面(避免盖住手机)
+      this.notebookGroup.traverse((o) => {
+        o.renderOrder = 9;
+      });
     }
     this.setNoDepth(this.phoneGroup);
     this.setNoDepth(this.remindGroup);
@@ -1500,34 +1506,45 @@ export class Scene3D {
     }
 
     // 家属堵门:角色站在电梯门口(特殊位置,不在电梯内),头顶出现「别堵门!」按钮
-    // 进场:从走廊(门洞外)走进门洞;离场:走到右侧(拟真发难位,发难则留在那里骂人)
+    // 进场:从走廊(门洞外)走进门洞;离场:被赶走 → 朝门外走(电梯离开楼层后才清理),
+    // 拟真发难(自动妥协)→ 走到右侧骂人位
     const famBlock = this.engine.familyActive;
     const smile = this.engine.smileActive;
     if (famBlock && !this.wasFamBlock) {
       this.angryGuy.visible = true;
       this.angryGuy.position.set(0, 0, -1.1);
-      this.angryGuy.rotation.y = 0;
+      this.angryGuy.rotation.y = Math.PI; // 面向轿厢走进来
       this.blockAnim = { phase: 'enter', t: 0 };
-    } else if (!famBlock && this.wasFamBlock && this.angryGuy.visible && !this.blockAnim) {
-      this.blockAnim = { phase: 'exit', t: 0 };
+    } else if (!famBlock && this.wasFamBlock && this.angryGuy.visible && !this.blockAnim && !this.hallWait) {
+      this.blockAnim = { phase: 'exit', t: 0, exitMode: smile ? 'side' : 'out' };
     }
     this.wasFamBlock = famBlock;
     if (this.blockAnim) {
       const a = this.blockAnim;
       a.t += frameDt;
-      const dur = a.phase === 'enter' ? 1.0 : 0.9;
+      const dur = a.phase === 'enter' ? 1.0 : 1.1;
       const p = Math.min(1, a.t / dur);
       const ease = p * p * (3 - 2 * p);
-      const from = a.phase === 'enter' ? new THREE.Vector3(0, 0, -1.1) : new THREE.Vector3(0, 0, 0.35);
-      const to = a.phase === 'enter' ? new THREE.Vector3(0, 0, 0.35) : new THREE.Vector3(1.15, 0, 0.95);
-      this.angryGuy.position.lerpVectors(from, to, ease);
-      if (p >= 1) {
-        if (a.phase === 'exit') {
-          // 走到右侧:拟真模式家属还在骂人则留在那里,否则退场
-          this.angryGuy.rotation.y = Math.PI;
-          if (!smile) this.angryGuy.visible = false;
+      if (a.phase === 'enter') {
+        // 从走廊走进门洞
+        this.angryGuy.position.lerpVectors(new THREE.Vector3(0, 0, -1.1), new THREE.Vector3(0, 0, 0.35), ease);
+        if (p >= 1) {
+          this.angryGuy.rotation.y = 0; // 转身面向门口
+          this.blockAnim = null;
         }
-        this.blockAnim = null;
+      } else {
+        // 离场:被赶走 → 走出门洞到走廊;拟真发难 → 走到右侧骂人
+        const to = a.exitMode === 'side' ? new THREE.Vector3(1.15, 0, 0.95) : new THREE.Vector3(0, 0, -1.35);
+        this.angryGuy.position.lerpVectors(new THREE.Vector3(0, 0, 0.35), to, ease);
+        if (p >= 1) {
+          if (a.exitMode === 'side') {
+            this.angryGuy.rotation.y = Math.PI; // 面向玩家骂人
+          } else {
+            this.angryGuy.rotation.y = 0; // 面向走廊,站到门外等电梯离开
+            this.hallWait = { floor: this.engine.elevator.floor };
+          }
+          this.blockAnim = null;
+        }
       }
     } else if (famBlock) {
       this.angryGuy.position.set(0, 0, 0.35); // 门口(门洞内,堵住进出)
@@ -1536,7 +1553,15 @@ export class Scene3D {
       this.angryGuy.position.set(1.15, 0, 0.95);
       this.angryGuy.rotation.y = Math.PI;
     }
-    this.angryGuy.visible = this.angryGuy.visible && (famBlock || smile || this.blockAnim !== null);
+    // 站在门外的家属:电梯离开该楼层后才清理模型(而不是关门就清理,避免动画时序问题)
+    if (this.hallWait) {
+      const ev = this.engine.elevator;
+      if (ev.moving || ev.floor !== this.hallWait.floor) {
+        this.hallWait = null;
+        this.angryGuy.visible = false;
+      }
+    }
+    this.angryGuy.visible = this.angryGuy.visible && (famBlock || smile || this.blockAnim !== null || this.hallWait !== null);
     this.blockBtn.visible = famBlock && !this.blockAnim;
     if (this.blockBtn.visible) {
       this.blockBtn.position.set(0, 2.0, 0.35);
