@@ -62,6 +62,8 @@ export interface Task {
   answered: boolean;
   /** 接听时刻(现实秒,打字机从此刻开始播放) */
   answeredAt: number;
+  /** 接听时确定的打字机速度(ms/字;vip 固定 200,其余随机 100~200) */
+  revealMsPerChar?: number;
   /** 是否带家属/护士陪护(陪护站旁边,占用 1 格,会自己按电梯按钮) */
   companion?: boolean;
   /** 陪护人身份:家属 / 护士(决定模型与文案) */
@@ -99,6 +101,8 @@ export interface TaskView {
   answered: boolean;
   /** 接听时刻(现实秒) */
   answeredAt: number;
+  /** 接听时确定的打字机速度(ms/字) */
+  revealMsPerChar?: number;
   /** 家属/护士陪护(随病人上梯,占 1 格) */
   companion?: boolean;
   /** 陪护人身份:家属 / 护士 */

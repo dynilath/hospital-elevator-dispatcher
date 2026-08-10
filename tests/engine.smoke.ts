@@ -335,10 +335,27 @@ function check(name: string, cond: boolean, extra = '') {
   check('未接听 → 不记录', eng.isRecorded(t as never) === false);
   eng.answerCall(42);
   check('刚接听打字未开始 → 不记录', eng.isRecorded(t as never) === false);
-  (t as { answeredAt: number }).answeredAt = now - 1.5; // 接听后已过 1.5 秒,打字早已完成
+  const rpc = (t as { revealMsPerChar?: number }).revealMsPerChar ?? 0;
+  check('普通来电打字速度随机 100~200ms/字', rpc >= 100 && rpc <= 200, `rpc=${rpc}`);
+  (t as { answeredAt: number }).answeredAt = now - 15; // 接听后已过 15 秒(最慢 200ms/字 × 22 字≈4.4s),打字早已完成
   check('接听且看完 → 记录', eng.isRecorded(t as never) === true);
   const snap = eng.getSnapshot();
   check('快照 recorded 正确', snap.tasks.find((x) => x.id === 42)?.recorded === true);
+}
+
+// ── 13b. 领导急召(vip)打字速度固定 200ms/字 ─────────────────────
+{
+  const eng = new GameEngine({ floors: 8, emergencyGap: 55, dayMinutes: 8, simulate: false });
+  const e = eng as unknown as { tasks: unknown[] };
+  const now = Date.now() / 1000;
+  const t = {
+    id: 43, type: 'normal', title: '院办', text: '我是张院长!立刻到急诊大厅接我,耽误不起!',
+    fromFloor: 1, targetFloor: 5, kind: 'stand', status: 'pending', createdAt: now,
+    deadline: 0, wait: 0, callDelay: 0, callSent: true, callSentAt: now - 0.1, answered: false, flavor: 'vip',
+  };
+  e.tasks.push(t);
+  eng.answerCall(43);
+  check('领导来电打字速度固定 200ms/字', (t as { revealMsPerChar?: number }).revealMsPerChar === 200, `rpc=${(t as { revealMsPerChar?: number }).revealMsPerChar}`);
 }
 
 // ── 14. 厅外呼叫:▲/▼ 方向区别,顺向优先跳过反向呼叫 ─────────────
@@ -681,12 +698,12 @@ function check(name: string, cond: boolean, extra = '') {
   const bed = run([0.5, 0.5, 0.5, 0.5, 0.6, 0.2]);
   check('命中病床模板', bed.kind === 'bed', `kind=${bed.kind}`);
   check('病床必有家属陪同', bed.companion === true && bed.companionKind === 'family', `comp=${bed.companionKind}`);
-  check('病床文案追加家属陪同', bed.text.includes('(家属陪同)'), bed.text);
+  check('病床文案追加家属陪同', bed.text.includes('有家属陪同!'), bed.text);
   check('病床不设 noCall(必有电话通知)', bed.noCall !== true, `noCall=${bed.noCall}`);
   // 急救床(担架):所有紧急模板都带护士陪同
   const emg = spawner.makeEmergency(8);
   check('急救床必有护士陪同', emg !== null && emg.kind === 'stretcher' && emg.companion === true && emg.companionKind === 'nurse', `kind=${emg?.kind} comp=${emg?.companionKind}`);
-  check('急救床文案追加护士陪同', emg?.text.includes('(护士陪同)') ?? false, emg?.text ?? '');
+  check('急救床文案追加护士陪同', emg?.text.includes('有护士陪同!') ?? false, emg?.text ?? '');
   const emgSmall = spawner.makeEmergency(4);
   check('小楼急救床同样护士陪同', emgSmall !== null && emgSmall.companion === true && emgSmall.companionKind === 'nurse', `comp=${emgSmall?.companionKind}`);
 }

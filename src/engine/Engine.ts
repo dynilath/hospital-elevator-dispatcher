@@ -298,12 +298,14 @@ export class GameEngine {
     this.notify();
   }
 
-  /** 手机接听来电:标记为已接听(看完完整内容后才会记入笔记本) */
+  /** 手机接听来电:标记为已接听(看完完整内容后才会记入笔记本);同时确定打字机速度 */
   answerCall(taskId: number) {
     const t = this.tasks.find((x) => x.id === taskId);
     if (t && !t.answered) {
       t.answered = true;
       t.answeredAt = Date.now() / 1000;
+      // 领导(院办/医务科)语速慢、字字千钧,固定 200ms/字;其余随机 100~200ms/字
+      t.revealMsPerChar = t.flavor === 'vip' ? 200 : 100 + Math.random() * 100;
       this.notify();
     }
   }
@@ -312,7 +314,7 @@ export class GameEngine {
   isRecorded(t: Task): boolean {
     if (!t.answered) return false;
     const elapsedMs = (Date.now() / 1000 - t.answeredAt) * 1000;
-    return elapsedMs >= t.text.length * 20;
+    return elapsedMs >= t.text.length * (t.revealMsPerChar ?? 20);
   }
 
   /** 提前收工(不计算评级,结果页直接显示「提前下班」提示) */
@@ -895,6 +897,7 @@ export class GameEngine {
         callSentAt: t.callSentAt,
         answered: t.answered,
         answeredAt: t.answeredAt,
+        revealMsPerChar: t.revealMsPerChar,
         companion: t.companion,
         companionKind: t.companionKind,
         recorded: this.isRecorded(t),

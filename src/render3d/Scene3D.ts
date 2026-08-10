@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { GameEngine } from '../engine/Engine';
 import { FLOOR_DEPTS_OF, FLOOR_NAME } from '../config';
-import { sfx } from '../engine/audio';
+import { sfx, CALL_PROFILE } from '../engine/audio';
 import { arrow, canvasTexture, draw7seg, FONT_CN, FONT_PX, makeCanvas } from './canvasUtils';
 import { buildModelForKind, buildNurse, buildPerson, disposeGroup, M, PERSON_STYLES, type PersonStyle } from './models';
 import type { Task, TaskView } from '../types';
@@ -43,6 +43,8 @@ const pushOffsetOf = (rotY: number, flip = false): { x: number; z: number } => {
 const CRITIC_STYLE: PersonStyle = { body: M.pink, bodyD: M.pinkD, hair: M.hairGray };
 /** 挑剔家属抱怨台词(头顶气泡循环播放) */
 const CRITIC_LINES = ['这个人真闲…', '就只用按电梯…', '现在的年轻人啊…'];
+/** 通话字幕读完后再停留多久自动挂断(ms) */
+const AUTO_HANGUP_MS = 1500;
 
 /** 角色头顶气泡(按任务 id 独立 Sprite,多角色可同时显示) */
 interface RoleBubble {
@@ -732,8 +734,8 @@ export class Scene3D {
     return this.bubbleAt(taskId, text, durationMs);
   }
 
-  /** 显示/刷新指定角色的头顶气泡(定位到角色当前位置) */
-  private bubbleAt(taskId: number, text: string, durationMs: number): boolean {
+  /** 显示/刷新指定角色的头顶气泡(定位到角色当前位置);voice=true 时播放模拟人声 */
+  private bubbleAt(taskId: number, text: string, durationMs: number, voice = true): boolean {
     const m = this.models.get(taskId) ?? this.companionModels.get(taskId);
     if (!m) return false;
     let b = this.bubbles.get(taskId);
@@ -749,6 +751,14 @@ export class Scene3D {
     b.until = performance.now() + durationMs;
     b.sprite.visible = true;
     b.sprite.position.set(m.position.x, m.position.y + b.headY, m.position.z);
+    if (voice) {
+      // 语音时长与台词字数大致相关(约 190ms/字,下限 450ms,不超过气泡时长)
+      const chars = text.replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, '').length;
+      const voiceMs = Math.min(durationMs, Math.max(450, chars * 190 + 250));
+      // 阿巴阿巴角色(老年痴呆)用专属含糊人声
+      if (t?.personality === 'babbling') sfx.vocalizeBabble(voiceMs);
+      else sfx.vocalize(voiceMs);
+    }
     return true;
   }
 
@@ -1222,17 +1232,23 @@ export class Scene3D {
     ctx.strokeStyle = '#4dd0e1';
     ctx.lineWidth = 3;
     ctx.strokeRect(1.5, 1.5, w - 3, h - 3);
-    // 标题行
+    // 正文打字进度(从接听时刻开始,速度为接听时确定的 ms/字,vip 领导慢速)
+    const msPerChar = t.revealMsPerChar ?? 20;
+    const elapsedMs = (Date.now() / 1000 - t.answeredAt) * 1000;
+    const reveal = Math.min(t.text.length, Math.max(0, Math.floor(elapsedMs / msPerChar)));
+    const typing = reveal < t.text.length;
+    // 通话读完并停留片刻后自动挂断(等同点击挂断按钮)
+    if (!typing && elapsedMs >= t.text.length * msPerChar + AUTO_HANGUP_MS) {
+      this.cbs.onHangup();
+      return;
+    }
+    // 标题行(准确的楼层路线等正文读完才显示,先听内容后核对楼层)
     ctx.fillStyle = '#4dd0e1';
     ctx.font = FONT_CN(20);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     const route = t.flavor === 'prank' ? `目标:${t.fromFloor}F` : `${t.fromFloor}F → ${t.targetFloor}F`;
-    ctx.fillText(`📞 ${t.title} · ${route}`, 12, 10);
-    // 正文(打字机:从接听时刻开始)
-    const elapsedMs = (Date.now() / 1000 - t.answeredAt) * 1000;
-    const reveal = Math.min(t.text.length, Math.max(0, Math.floor(elapsedMs / 20)));
-    const typing = reveal < t.text.length;
+    ctx.fillText(`📞 ${t.title}${typing ? '' : ` · ${route}`}`, 12, 10);
     ctx.fillStyle = '#e8ecf4';
     ctx.font = FONT_CN(22);
     const maxW = w - 24;
@@ -1253,11 +1269,11 @@ export class Scene3D {
       const curX = 12 + ctx.measureText(line).width;
       ctx.fillStyle = '#4dd0e1';
       ctx.fillRect(curX, y, 5, 22);
-      // 打字音效(伴随打字模拟语音)
+      // 模拟人声(伴随打字:每段人声间留短暂停顿,形成通话说话感;电话音色固定偏高)
       this.tickT -= frameDt;
       if (this.tickT <= 0) {
-        this.tickT = 0.09;
-        sfx.tick();
+        this.tickT = 0.55 + Math.random() * 0.2;
+        sfx.vocalize(300 + Math.random() * 150, CALL_PROFILE);
       }
     }
     this.callTex.needsUpdate = true;
@@ -1338,7 +1354,7 @@ export class Scene3D {
       m.position.x += (tx - m.position.x) * lerpK;
       m.position.z += (tz - m.position.z) * lerpK;
       if (this.hallAnim && this.hallAnim.taskId === t.id && this.hallAnim.phase !== 'back') {
-        this.bubbleAt(t.id, this.hallAnim.dir === 'up' ? '按上行 ▲' : '按下行 ▼', 2500);
+        this.bubbleAt(t.id, this.hallAnim.dir === 'up' ? '按上行 ▲' : '按下行 ▼', 2500, false);
       }
       // 卧床病人候梯时,陪护已站在床头推床位(与病床一起进入轿厢,表现推床)
       // 第二张病床(靠墙侧)的陪护镜像到床尾侧,避免站进走廊墙里
@@ -1537,7 +1553,7 @@ export class Scene3D {
       // 头顶气泡:走到面板与按下阶段显示
       const cm = this.companionModels.get(a.taskId);
       if (cm && a.phase !== 'back') {
-        this.bubbleAt(a.taskId, '按楼层按钮…', 2500);
+        this.bubbleAt(a.taskId, '按楼层按钮…', 2500, false);
       } else {
         this.removeBubble(a.taskId);
       }
@@ -1715,7 +1731,8 @@ export class Scene3D {
         text = `我要去 ${t.targetFloor} 楼!`;
         sfx.message();
     }
-    this.bubbleAt(taskId, text, 2400);
+    // 卧床沉默「…」不算说话,不播人声
+    this.bubbleAt(taskId, text, 2400, text !== '…');
   }
 
   private modelFor(t: Task): THREE.Group {

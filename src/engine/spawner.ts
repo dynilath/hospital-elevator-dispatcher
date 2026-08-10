@@ -49,11 +49,11 @@ function companionOf(spec: TaskSpec): TaskSpec {
   if (spec.kind === 'bed') {
     spec.companion = true;
     spec.companionKind = 'family';
-    spec.text += ' (家属陪同)';
+    spec.text = oralAppend(spec.text, '有家属陪同!');
   } else if (spec.kind === 'wheelchair' && Math.random() < 0.6) {
     spec.companion = true;
     spec.companionKind = 'family';
-    spec.text += ' (家属陪同)';
+    spec.text = oralAppend(spec.text, '有家属陪同!');
   }
   return spec;
 }
@@ -62,8 +62,13 @@ function companionOf(spec: TaskSpec): TaskSpec {
 function nurseCompanion(spec: TaskSpec): TaskSpec {
   spec.companion = true;
   spec.companionKind = 'nurse';
-  spec.text += ' (护士陪同)';
+  spec.text = oralAppend(spec.text, '有护士陪同!');
   return spec;
+}
+
+/** 电话文本口语化追加(去掉原句尾标点,避免「抢救!有护士陪同!」粘连) */
+function oralAppend(text: string, tail: string): string {
+  return text.replace(/[。！!]+$/, '') + `，${tail}`;
 }
 
 /** 挂号打码姓名:郑** / 刘*明 / 王* */
